@@ -28,7 +28,7 @@ As a software engineer, I like using `.env` files but as a paranoid devops engin
 - [🔒 dotprot](#-dotprot)
   - [Why?](#why)
   - [Contents](#contents)
-  - [How?](#how)
+  - [Quickstart](#quickstart)
   - [How it works](#how-it-works)
   - [Requirements](#requirements)
   - [Install](#install)
@@ -44,7 +44,7 @@ As a software engineer, I like using `.env` files but as a paranoid devops engin
   - [Development](#development)
   - [License](#license)
 
-## How?
+## Quickstart
 
 - [Install dotprot](#install)
 - Change directory to any directory with a `.env` file.
