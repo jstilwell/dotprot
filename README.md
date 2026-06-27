@@ -2,7 +2,7 @@
 
 # 🔒 dotprot
 
-**Pick up where you left off — without worrying about your `.env` files.**
+**Pick up where you left off without worrying about your `.env` files.**
 
 Lock your `.env` (and anything else you list) into a dedicated 1Password vault,
 then restore it on demand. dotprot uploads the exact bytes, **verifies the copy
