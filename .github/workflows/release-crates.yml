@@ -15,7 +15,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,4 +37,16 @@ jobs:
         env:
           # cargo reads the token from this env var; keeps it off the command line.
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: |
+          # Capture output so we can treat an already-published version as
+          # success (re-runs of the same tag shouldn't fail the workflow).
+          if output="$(cargo publish 2>&1)"; then
+            echo "$output"
+          else
+            echo "$output"
+            if echo "$output" | grep -q "already exists on crates.io"; then
+              echo "Version already published; treating as success."
+            else
+              exit 1
+            fi
+          fi
