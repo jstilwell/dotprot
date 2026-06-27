@@ -186,8 +186,7 @@ cargo clippy           # lint
 cargo build --release  # optimized binary
 ```
 
-See [CHANGELOG.md](CHANGELOG.md) for release history and
-[CLAUDE.md](CLAUDE.md) for contributor/agent guidelines.
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
