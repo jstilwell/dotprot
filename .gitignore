@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+.DS_Store
+*.log
+
+# Local Claude Code settings (machine-specific, not for the public repo)
+.claude/settings.local.json
+
+# Never commit real protected files or secrets (this is a public repo)
+.env
+.env.*
+!.env.example
