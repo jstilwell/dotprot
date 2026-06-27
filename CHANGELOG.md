@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Release distribution via [cargo-dist]: cross-compiled binaries for macOS
+  (arm64/x86_64), Linux (arm64/x86_64), and Windows (x86_64), attached to a
+  tagged GitHub release.
+- Install channels: a Homebrew tap (`brew install jstilwell/tap/dotprot`),
+  shell/PowerShell one-line installers, and crates.io (`cargo install dotprot`).
+
+### Known limitations
+
+- **Windows:** the owner-only (`0600`) file-permission hardening is enforced on
+  macOS and Linux only. On Windows the temp and restored files use default ACLs.
+  The verify-then-delete guarantee and `.prot`-vault scoping hold on all
+  platforms.
+
+[cargo-dist]: https://github.com/axodotdev/cargo-dist
 
 ## [0.1.0] - Unreleased
 

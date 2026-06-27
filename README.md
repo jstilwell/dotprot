@@ -177,6 +177,12 @@ after a verified, recoverable copy exists in 1Password.**
   `0600` temp file that's deleted immediately afterward (the 1Password CLI does
   not reliably accept piped stdin).
 
+> **Platform note (Windows):** the owner-only (`0600`) file-permission hardening
+> is currently enforced on **macOS and Linux only**. On Windows the temp and
+> restored files are created with default ACLs. The verify-then-delete guarantee
+> and vault scoping hold on all platforms; only the file-permission tightening is
+> Unix-only for now. See [CHANGELOG.md](CHANGELOG.md).
+
 ## Development
 
 ```sh
