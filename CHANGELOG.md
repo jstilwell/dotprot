@@ -7,24 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+Nothing yet.
 
-- Release distribution via [cargo-dist]: cross-compiled binaries for macOS
-  (arm64/x86_64), Linux (arm64/x86_64), and Windows (x86_64), attached to a
-  tagged GitHub release.
-- Install channels: a Homebrew tap (`brew install jstilwell/tap/dotprot`),
-  shell/PowerShell one-line installers, and crates.io (`cargo install dotprot`).
-
-### Known limitations
-
-- **Windows:** the owner-only (`0600`) file-permission hardening is enforced on
-  macOS and Linux only. On Windows the temp and restored files use default ACLs.
-  The verify-then-delete guarantee and `.prot`-vault scoping hold on all
-  platforms.
-
-[cargo-dist]: https://github.com/axodotdev/cargo-dist
-
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-06-27
 
 Initial release. A self-contained Rust binary that locks `.env` (and any other
 files listed in `.prot`) into a dedicated 1Password vault and restores them on
@@ -49,6 +34,18 @@ demand.
 - Mixed-state detection: bare `dotprot` refuses to guess when some protected
   files are present and others are missing, directing the user to an explicit
   `lock`/`unlock`.
+- Release distribution via [cargo-dist]: cross-compiled binaries for macOS
+  (arm64/x86_64), Linux (arm64/x86_64), and Windows (x86_64), attached to a
+  tagged GitHub release.
+- Install channels: a Homebrew tap (`brew install jstilwell/tap/dotprot`),
+  shell/PowerShell one-line installers, and crates.io (`cargo install dotprot`).
+
+### Known limitations
+
+- **Windows:** the owner-only (`0600`) file-permission hardening is enforced on
+  macOS and Linux only. On Windows the temp and restored files use default ACLs.
+  The verify-then-delete guarantee and `.prot`-vault scoping hold on all
+  platforms.
 
 ### Security
 
@@ -61,5 +58,6 @@ demand.
 - Secrets are passed to `op` via a short-lived `0600` temp file that is removed
   immediately, and restored files are written with `0600` permissions.
 
+[cargo-dist]: https://github.com/axodotdev/cargo-dist
 [Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jstilwell/dotprot/releases/tag/v0.1.0
