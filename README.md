@@ -21,7 +21,7 @@ round-trips correctly, and only then removes the file from disk.**
 
 ## Why?
 
-As a software engineer, I like using `.env` files but as a paranoid devops engineer, I know it's pretty dumb to leave a bunch of .env files on your disk. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files?
+As a software engineer, I like using `.env` files but as a paranoid devops engineer, I know it's pretty dumb to leave a bunch of .env files on your disk. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files? Then it just felt like a no-brainer to create a little easy-to-use wrapper for 1Password CLI to lock `.env` files away inside of a 1Password vault and then retrieve them when I'm ready to work again.
 
 ## Contents
 
