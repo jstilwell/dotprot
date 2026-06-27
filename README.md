@@ -19,27 +19,52 @@ round-trips correctly, and only then removes the file from disk.**
 
 ---
 
-## Why
+## Why?
 
-You finish for the day, your project's secrets sit in a plaintext `.env`. You
-come back next week (or clone the repo on another machine) and have to hunt them
-down again. dotprot makes that a single command: `dotprot` tucks the files
-safely into 1Password and removes them locally; `dotprot` again brings them
-back, byte-for-byte. Your secrets live where they belong, and you never lose the
-thread of a project.
-
-A single self-contained binary — no runtime to install — that shells out to the
-official 1Password CLI for all storage and authentication.
+As a developer, I like using `.env` files but as a paranoid devops engineer, I know it's pretty dumb to leave a bunch of .env files on your disk. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files?
 
 ## Contents
 
-- [How it works](#how-it-works)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Usage](#usage)
-- [The `.prot` file](#the-prot-file)
-- [Safety guarantees](#safety-guarantees)
-- [Development](#development)
+- [🔒 dotprot](#-dotprot)
+  - [Why?](#why)
+  - [Contents](#contents)
+  - [How?](#how)
+  - [How it works](#how-it-works)
+  - [Requirements](#requirements)
+  - [Install](#install)
+    - [Homebrew](#homebrew)
+    - [Cargo](#cargo)
+    - [Prebuilt binaries](#prebuilt-binaries)
+    - [From source](#from-source)
+  - [Usage](#usage)
+    - [The toggle](#the-toggle)
+    - [Trying it safely with `--keep`](#trying-it-safely-with---keep)
+  - [The `.prot` file](#the-prot-file)
+  - [Safety guarantees](#safety-guarantees)
+  - [Development](#development)
+  - [License](#license)
+
+## How?
+
+- [Install dotprot](#install)
+- Change directory to any directory with a `.env` file.
+  - If you don't use `.env` then type `dotprot setup` and add your file(s) to `.prot`
+- Sign in to 1Password via `op signin`
+- Type `dotprot`
+
+```shell
+Created .prot (protecting: .env*).
+Created 1Password vault ".prot" (6djqbcxlh235372hbuvtuqnr4i).
+(one-time setup — future runs reuse it)
+  locked .env -> 1Password
+Locked 1 file(s) into vault ".prot".
+```
+
+- Type `ls -a`
+- Notice `.env` is no longer there.
+- Check your brand new `.prot` vault in 1Password
+- 🎉 There it is!
+- Type `dotprot` again to bring your .env file back. (It stays in 1Password)
 
 ## How it works
 
@@ -120,11 +145,11 @@ Locked 1 file(s) into vault ".prot".
 
 Running bare `dotprot` figures out which way to go from what's on disk:
 
-| State                                   | What `dotprot` does            |
-| --------------------------------------- | ------------------------------ |
-| Protected files are **present**         | Locks them into 1Password      |
-| Protected files are **missing**         | Restores them from 1Password   |
-| **Mixed** (some present, some missing)  | Stops and asks you to be explicit (`dotprot lock` / `dotprot unlock`) |
+| State                                  | What `dotprot` does                                                   |
+| -------------------------------------- | --------------------------------------------------------------------- |
+| Protected files are **present**        | Locks them into 1Password                                             |
+| Protected files are **missing**        | Restores them from 1Password                                          |
+| **Mixed** (some present, some missing) | Stops and asks you to be explicit (`dotprot lock` / `dotprot unlock`) |
 
 ### Trying it safely with `--keep`
 
@@ -158,7 +183,7 @@ config/secrets.json
 
 ## Safety guarantees
 
-dotprot's whole reason to exist is to make secrets *easier* to manage, never to
+dotprot's whole reason to exist is to make secrets _easier_ to manage, never to
 put them at risk. The design centers on one rule: **a local file is deleted only
 after a verified, recoverable copy exists in 1Password.**
 
@@ -169,7 +194,7 @@ after a verified, recoverable copy exists in 1Password.**
 - **Scoped to the `.prot` vault only.** Every 1Password operation is scoped with
   `--vault .prot`. dotprot **never deletes 1Password items in normal
   operation** — lock creates/updates documents, unlock only reads them.
-- **Incremental persistence.** `.prot` is updated after *each* file locks, so an
+- **Incremental persistence.** `.prot` is updated after _each_ file locks, so an
   interruption mid-batch leaves you in a consistent, recoverable state.
 - **Backups are kept.** Documents stay in 1Password after unlock, so a directory
   stays re-lockable and you always have a copy. Re-locking overwrites the

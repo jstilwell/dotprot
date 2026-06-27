@@ -10,3 +10,6 @@
 .env
 .env.*
 !.env.example
+
+# This repo is itself a dotprot project; never commit its local .prot state
+.prot
