@@ -12,9 +12,8 @@ round-trips correctly, and only then removes the file from disk.**
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy%20me%20a%20coffee-ffdd00.svg)](https://buy.stripe.com/5kQ4gBe7Lc7s68YaqZ4F200)
 
-☕ **[Support this project](https://buy.stripe.com/5kQ4gBe7Lc7s68YaqZ4F200)** — A
-donation in support of Jesse Stilwell as the principal engineer and maintainer of
-a free and open source project. Or for some other reason. He's pretty cool?
+☕ **[Support this project](https://buy.stripe.com/5kQ4gBe7Lc7s68YaqZ4F200)**
+(Appreciated but not necessary)
 
 </div>
 
