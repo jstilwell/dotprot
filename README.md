@@ -12,37 +12,13 @@ round-trips correctly, and only then removes the file from disk.**
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Buy me a coffee](https://img.shields.io/badge/%E2%98%95-Buy%20me%20a%20coffee-ffdd00.svg)](https://buy.stripe.com/5kQ4gBe7Lc7s68YaqZ4F200)
 
-☕ **[Support this project](https://buy.stripe.com/5kQ4gBe7Lc7s68YaqZ4F200)**
-(Appreciated but not necessary)
-
 </div>
 
 ---
 
 ## Why?
 
-As a software engineer, I like using `.env` files but my paranoia doesn't allow for me to leave a bunch of .env files on my disk without worrying about it. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files? Then it just felt like a no-brainer to create a little easy-to-use wrapper for 1Password CLI to lock `.env` files away inside of a 1Password vault and then retrieve them when I'm ready to work again.
-
-## Contents
-
-- [🔒 dotprot](#-dotprot)
-  - [Why?](#why)
-  - [Contents](#contents)
-  - [Quickstart](#quickstart)
-  - [How it works](#how-it-works)
-  - [Requirements](#requirements)
-  - [Install](#install)
-    - [Homebrew](#homebrew)
-    - [Cargo](#cargo)
-    - [Prebuilt binaries](#prebuilt-binaries)
-    - [From source](#from-source)
-  - [Usage](#usage)
-    - [The toggle](#the-toggle)
-    - [Trying it safely with `--keep`](#trying-it-safely-with---keep)
-  - [The `.prot` file](#the-prot-file)
-  - [Safety guarantees](#safety-guarantees)
-  - [Development](#development)
-  - [License](#license)
+As a software engineer, I like using `.env` files but my paranoia doesn't allow for me to leave a bunch of .env files on my disk without worrying about it. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files as file attachments? Then it just felt like a no-brainer to create a little easy-to-use wrapper for 1Password CLI to lock `.env` files away inside of a 1Password vault and then retrieve them when I'm ready to work again.
 
 ## Quickstart
 
@@ -64,7 +40,28 @@ Locked 1 file(s) into vault ".prot".
 - Notice `.env` is no longer there.
 - Check your brand new `.prot` vault in 1Password
 - 🎉 There it is!
-- Type `dotprot` again to bring your .env file back. (It stays in 1Password)
+- Type `dotprot` again to bring your .env file back. (A copy stays behind in 1Password)
+
+## Contents
+
+- [🔒 dotprot](#-dotprot)
+  - [Why?](#why)
+  - [Quickstart](#quickstart)
+  - [Contents](#contents)
+  - [How it works](#how-it-works)
+  - [Requirements](#requirements)
+  - [Install](#install)
+    - [Homebrew](#homebrew)
+    - [Cargo](#cargo)
+    - [Prebuilt binaries](#prebuilt-binaries)
+    - [From source](#from-source)
+  - [Usage](#usage)
+    - [The toggle](#the-toggle)
+    - [Trying it safely with `--keep`](#trying-it-safely-with---keep)
+  - [The `.prot` file](#the-prot-file)
+  - [Safety guarantees](#safety-guarantees)
+  - [Development](#development)
+  - [License](#license)
 
 ## How it works
 
