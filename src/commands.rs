@@ -31,7 +31,15 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
         for entry in glob::glob(&abs_pattern)? {
             let path = match entry {
                 Ok(p) => p,
-                Err(_) => continue, // unreadable entry — skip
+                Err(e) => {
+                    // An entry we couldn't read (e.g. a permission error while
+                    // walking). Don't abort the whole lock over one bad entry,
+                    // but never swallow it silently: a file the user meant to
+                    // protect could otherwise be skipped while they believe it
+                    // was handled, leaving a secret in plaintext on disk.
+                    eprintln!("  warning: could not read {} — skipped", e.path().display());
+                    continue;
+                }
             };
             if !path.is_file() {
                 continue;

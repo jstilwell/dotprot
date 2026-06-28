@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- During `lock`, a file-glob entry that can't be read (e.g. a permission error
+  while walking a directory) now prints a `warning: could not read … — skipped`
+  line instead of being dropped silently. One unreadable entry still doesn't
+  abort the lock, but it's no longer invisible — a file you meant to protect
+  won't be skipped without you knowing.
+
 ### Security
 
 - The `.prot` state file is now written with owner-only (`0600`) permissions on
