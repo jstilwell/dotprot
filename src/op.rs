@@ -213,13 +213,6 @@ pub fn get_document(vault: &str, id: &str) -> Result<Vec<u8>> {
     run_op(&["document", "get", id, "--vault", vault, "--force"])
 }
 
-/// Delete a document by ID.
-#[allow(dead_code)]
-pub fn delete_document(vault: &str, id: &str) -> Result<()> {
-    run_op(&["document", "delete", id, "--vault", vault])?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

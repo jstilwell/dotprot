@@ -61,8 +61,15 @@ fn document_title(cwd: &Path, rel_file: &str) -> String {
     cwd.join(rel_file).to_string_lossy().to_string()
 }
 
+/// Whether a protected file is present on disk.
+///
+/// Uses `try_exists` rather than `exists` so a "couldn't determine" (e.g. a
+/// permission error) is not silently read as "absent". An indeterminate result
+/// is treated as **present**, which is the safe bias for every caller: unlock
+/// then declines to overwrite a file it can't read, and toggle steers away from
+/// a destructive restore when it can't be sure the original is gone.
 fn file_exists(p: &Path) -> bool {
-    p.exists()
+    p.try_exists().unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------

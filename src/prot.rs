@@ -27,8 +27,11 @@ const HEADER_NOTE: &str = "# dotprot — managed below, do not edit";
 pub struct ProtData {
     /// Vault ID, once setup/lock has run.
     pub vault: Option<String>,
-    /// (file pattern as written by the user) -> 1Password document ID.
-    /// A Vec rather than a map to keep insertion order stable on round-trip.
+    /// (concrete relative file path) -> 1Password document ID. These are the
+    /// expanded paths a lock actually stored, not the user's glob patterns — a
+    /// pattern like `.env*` becomes one entry per matched file (`.env`,
+    /// `.env.local`, …). A Vec rather than a map to keep insertion order stable
+    /// on round-trip.
     pub documents: Vec<(String, String)>,
     /// User-maintained glob patterns of files to protect.
     pub patterns: Vec<String>,
@@ -44,21 +47,20 @@ impl ProtData {
         }
     }
 
-    /// Look up a recorded document ID for a pattern entry.
-    pub fn document_id(&self, pattern: &str) -> Option<&str> {
+    /// Look up a recorded document ID for a concrete file path.
+    pub fn document_id(&self, file: &str) -> Option<&str> {
         self.documents
             .iter()
-            .find(|(p, _)| p == pattern)
+            .find(|(p, _)| p == file)
             .map(|(_, id)| id.as_str())
     }
 
-    /// Insert or update the document ID for a pattern entry.
-    pub fn set_document(&mut self, pattern: &str, id: &str) {
-        if let Some(entry) = self.documents.iter_mut().find(|(p, _)| p == pattern) {
+    /// Insert or update the document ID for a concrete file path.
+    pub fn set_document(&mut self, file: &str, id: &str) {
+        if let Some(entry) = self.documents.iter_mut().find(|(p, _)| p == file) {
             entry.1 = id.to_string();
         } else {
-            self.documents
-                .push((pattern.to_string(), id.to_string()));
+            self.documents.push((file.to_string(), id.to_string()));
         }
     }
 }
