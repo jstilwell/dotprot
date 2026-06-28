@@ -87,7 +87,10 @@ fn parse_id(stdout: &[u8]) -> Result<String> {
 /// fake to assert ordering guarantees (e.g. that a file is never deleted when
 /// the read-back doesn't match) without touching a live vault.
 pub trait OpBackend {
-    fn assert_signed_in(&self) -> Result<()>;
+    /// Whether the user is currently signed in (no prompting).
+    fn is_signed_in(&self) -> Result<bool>;
+    /// Run `op signin` interactively.
+    fn sign_in(&self) -> Result<()>;
     fn find_vault(&self, name: &str) -> Result<Option<String>>;
     fn create_vault(&self, name: &str, description: &str) -> Result<String>;
     fn create_document(
@@ -112,8 +115,11 @@ pub trait OpBackend {
 pub struct RealOp;
 
 impl OpBackend for RealOp {
-    fn assert_signed_in(&self) -> Result<()> {
-        assert_signed_in()
+    fn is_signed_in(&self) -> Result<bool> {
+        is_signed_in()
+    }
+    fn sign_in(&self) -> Result<()> {
+        sign_in()
     }
     fn find_vault(&self, name: &str) -> Result<Option<String>> {
         find_vault(name)
@@ -145,20 +151,47 @@ impl OpBackend for RealOp {
     }
 }
 
-/// Verify `op` is installed and the user is signed in. Returns a friendly
-/// error otherwise.
-pub fn assert_signed_in() -> Result<()> {
+/// Whether the user is currently signed in to 1Password.
+///
+/// Returns `Ok(true)`/`Ok(false)` for the signed-in / not-signed-in cases, and
+/// `Err` only for an unexpected failure (e.g. `op` not installed, or an error
+/// that isn't recognizably "not signed in"). Splitting this out from
+/// [`assert_signed_in`] lets the command layer decide whether to prompt for an
+/// interactive sign-in rather than just erroring.
+pub fn is_signed_in() -> Result<bool> {
     // `op whoami` exits non-zero (and prints to stderr) when not signed in.
     match run_op(&["whoami"]) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(true),
         Err(e) => {
             if let Some(f) = e.downcast_ref::<OpFailure>() {
                 if f.stderr.to_lowercase().contains("not signed in") {
-                    bail!("You are not signed in to 1Password. Run `op signin` first.");
+                    return Ok(false);
                 }
             }
             Err(e)
         }
+    }
+}
+
+/// Run `op signin` interactively, inheriting the terminal so the user can
+/// complete authentication (Touch ID, desktop-app approval, or account/password
+/// prompts). Unlike [`run_op`], this does not capture stdio — `op` needs direct
+/// access to the terminal to prompt.
+pub fn sign_in() -> Result<()> {
+    let status = Command::new("op").arg("signin").status().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow!(
+                "The 1Password CLI (`op`) was not found on your PATH.\n\
+                 Install it: https://developer.1password.com/docs/cli/get-started/"
+            )
+        } else {
+            anyhow!("failed to run op signin: {e}")
+        }
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("`op signin` did not complete successfully. Not signed in.");
     }
 }
 

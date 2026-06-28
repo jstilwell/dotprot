@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- When you're not signed in to 1Password, dotprot now offers to sign you in
+  instead of just erroring out: at an interactive terminal it prompts
+  `Sign in now? [y/N]` and, on confirmation, runs `op signin` for you and then
+  continues with the original command. In a non-interactive context (CI, a
+  pipe) it never prompts or hangs — it falls back to the previous clear
+  `Run \`op signin\` first.` error.
 
 ## [0.2.0] - 2026-06-28
 

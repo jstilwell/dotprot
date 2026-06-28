@@ -87,8 +87,12 @@ repeatedly.
   signed in (`op signin`).
 
 dotprot never touches your 1Password credentials — it shells out to `op`, which
-handles all authentication. If you're not signed in, dotprot tells you to run
-`op signin` and does nothing else.
+handles all authentication. If you're not signed in when you run a command,
+dotprot offers to sign you in: at an interactive terminal it asks
+`Sign in now? [y/N]` and, on yes, runs `op signin` for you (Touch ID, the
+desktop-app approval, or an account prompt — whatever your setup uses) before
+continuing. In a non-interactive context (CI, a pipe), it doesn't prompt — it
+prints `Run \`op signin\` first.` and exits without doing anything.
 
 ## Install
 
