@@ -159,7 +159,7 @@ pub fn lock(cwd: &Path, keep: bool) -> Result<()> {
         let id = match prot.document_id(rel_file) {
             Some(existing) => {
                 let existing = existing.to_string();
-                op::edit_document(&vault, &existing, &file_name, &content)?;
+                op::edit_document(&vault, &existing, &title, &file_name, &content)?;
                 existing
             }
             None => op::create_document(&vault, &title, &file_name, &content)?,
@@ -267,24 +267,29 @@ pub fn toggle(cwd: &Path, keep: bool) -> Result<()> {
     };
 
     // Compare recorded documents against what's on disk.
-    let mut present = 0;
-    let mut absent = 0;
+    let mut present: Vec<&str> = Vec::new();
+    let mut absent: Vec<&str> = Vec::new();
     for (rel_file, _) in &prot.documents {
         if file_exists(&cwd.join(rel_file)) {
-            present += 1;
+            present.push(rel_file);
         } else {
-            absent += 1;
+            absent.push(rel_file);
         }
     }
 
-    if present > 0 && absent > 0 {
+    if !present.is_empty() && !absent.is_empty() {
         bail!(
-            "Mixed state: {present} recorded file(s) are present and {absent} are missing. \
-             Use `dotprot lock` or `dotprot unlock` explicitly to resolve the ambiguity."
+            "Mixed state: some recorded files are present on disk and others are missing, \
+             so it's unclear whether you mean to lock or unlock.\n\
+             \x20 present: {}\n\
+             \x20 missing: {}\n\
+             Use `dotprot lock` or `dotprot unlock` explicitly to resolve the ambiguity.",
+            present.join(", "),
+            absent.join(", "),
         );
     }
 
-    if absent > 0 {
+    if !absent.is_empty() {
         // Everything recorded is missing -> restore. (--keep is a no-op here.)
         unlock(cwd)
     } else {

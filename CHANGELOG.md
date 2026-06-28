@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Re-locking an existing file now also refreshes its 1Password document
+  **title** (the file's absolute path), so a moved file's vault entry no longer
+  keeps a stale title.
+- The bare `dotprot` "mixed state" error now lists exactly which recorded files
+  are present and which are missing, instead of just reporting counts.
 - During `lock`, a file-glob entry that can't be read (e.g. a permission error
   while walking a directory) now prints a `warning: could not read … — skipped`
   line instead of being dropped silently. One unreadable entry still doesn't

@@ -181,8 +181,16 @@ pub fn create_document(
     parse_id(&stdout)
 }
 
-/// Replace an existing document's contents from raw bytes.
-pub fn edit_document(vault: &str, id: &str, file_name: &str, content: &[u8]) -> Result<()> {
+/// Replace an existing document's contents from raw bytes, keeping its title in
+/// sync (the title is the file's absolute path, which can change if the file is
+/// moved between locks).
+pub fn edit_document(
+    vault: &str,
+    id: &str,
+    title: &str,
+    file_name: &str,
+    content: &[u8],
+) -> Result<()> {
     let (_dir, path) = temp_file_with(file_name, content)?;
     let path_str = path.to_string_lossy();
     run_op(&[
@@ -192,6 +200,8 @@ pub fn edit_document(vault: &str, id: &str, file_name: &str, content: &[u8]) -> 
         &path_str,
         "--vault",
         vault,
+        "--title",
+        title,
         "--file-name",
         file_name,
     ])?;
