@@ -132,9 +132,25 @@ pub fn read(path: &Path) -> Result<Option<ProtData>> {
     }
 }
 
-/// Serialize and write `.prot`.
+/// Serialize and write `.prot` with owner-only (`0600`) permissions on Unix.
+///
+/// `.prot` holds no secrets — only vault and document IDs — but it is a precise
+/// map of which 1Password documents hold this project's secrets, so we keep it
+/// as locked down as every other file dotprot writes.
 pub fn write(path: &Path, data: &ProtData) -> Result<()> {
-    fs::write(path, serialize(data)).with_context(|| format!("writing {}", path.display()))
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(serialize(data).as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
@@ -227,5 +243,17 @@ mod tests {
             vec![".env".to_string(), ".env.local".to_string()]
         );
         assert_eq!(p.vault, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_creates_prot_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".prot");
+        write(&path, &ProtData::empty()).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        // Only the low 9 permission bits matter here.
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
     }
 }

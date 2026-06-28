@@ -204,7 +204,9 @@ after a verified, recoverable copy exists in 1Password.**
   or machines.
 - **Minimal on-disk exposure.** Secrets are handed to `op` via a short-lived
   `0600` temp file that's deleted immediately afterward (the 1Password CLI does
-  not reliably accept piped stdin).
+  not reliably accept piped stdin). Restored files and the `.prot` state file are
+  also written `0600` (newly created ones; an existing `.prot`'s mode is left as
+  you set it).
 
 > **Platform note (Windows):** the owner-only (`0600`) file-permission hardening
 > is currently enforced on **macOS and Linux only**. On Windows the temp and

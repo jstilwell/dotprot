@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- The `.prot` state file is now written with owner-only (`0600`) permissions on
+  Unix when created, matching every other file dotprot writes. It holds no
+  secrets — only vault and document IDs — but it maps which 1Password documents
+  back this project, so it's no longer left world-readable. An existing
+  `.prot`'s permissions are left untouched.
 
 ## [0.1.0] - 2026-06-27
 
