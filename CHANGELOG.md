@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-06-28
+
 ### Changed
 
 - Re-locking an existing file now also refreshes its 1Password document
@@ -78,5 +82,6 @@ demand.
   immediately, and restored files are written with `0600` permissions.
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
-[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jstilwell/dotprot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jstilwell/dotprot/releases/tag/v0.1.0
