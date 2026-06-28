@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 
-use crate::op;
+use crate::op::OpBackend;
 use crate::prot::{self, ProtData};
 
 pub const VAULT_NAME: &str = ".prot";
@@ -76,15 +76,15 @@ fn file_exists(p: &Path) -> bool {
 // setup
 // ---------------------------------------------------------------------------
 
-pub fn setup() -> Result<()> {
-    op::assert_signed_in()?;
+pub fn setup(op: &impl OpBackend) -> Result<()> {
+    op.assert_signed_in()?;
 
-    if let Some(id) = op::find_vault(VAULT_NAME)? {
+    if let Some(id) = op.find_vault(VAULT_NAME)? {
         println!("Vault \"{VAULT_NAME}\" already exists ({id}).");
         return Ok(());
     }
 
-    let id = op::create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
+    let id = op.create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
     println!("Created vault \"{VAULT_NAME}\" ({id}).");
     Ok(())
 }
@@ -92,14 +92,14 @@ pub fn setup() -> Result<()> {
 /// Resolve the vault ID, finding it if not already cached in `prot`. If the
 /// vault doesn't exist in 1Password yet, create it (a one-time action) and
 /// announce it clearly so the user knows a vault was made in their account.
-fn ensure_vault(prot: &mut ProtData) -> Result<String> {
+fn ensure_vault(op: &impl OpBackend, prot: &mut ProtData) -> Result<String> {
     if let Some(v) = &prot.vault {
         return Ok(v.clone());
     }
-    let id = match op::find_vault(VAULT_NAME)? {
+    let id = match op.find_vault(VAULT_NAME)? {
         Some(found) => found,
         None => {
-            let created = op::create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
+            let created = op.create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
             println!("Created 1Password vault \"{VAULT_NAME}\" ({created}).");
             println!("(one-time setup — future runs reuse it)");
             created
@@ -118,8 +118,8 @@ fn ensure_vault(prot: &mut ProtData) -> Result<String> {
 /// With `keep = true`, files are uploaded and verified but NOT deleted from
 /// disk — useful for confirming the vault copy yourself before trusting
 /// dotprot to remove anything.
-pub fn lock(cwd: &Path, keep: bool) -> Result<()> {
-    op::assert_signed_in()?;
+pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
+    op.assert_signed_in()?;
 
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
@@ -133,7 +133,7 @@ pub fn lock(cwd: &Path, keep: bool) -> Result<()> {
         }
     };
 
-    let vault = ensure_vault(&mut prot)?;
+    let vault = ensure_vault(op, &mut prot)?;
     let files = expand_patterns(cwd, &prot.patterns)?;
 
     if files.is_empty() {
@@ -166,15 +166,15 @@ pub fn lock(cwd: &Path, keep: bool) -> Result<()> {
         let id = match prot.document_id(rel_file) {
             Some(existing) => {
                 let existing = existing.to_string();
-                op::edit_document(&vault, &existing, &title, &file_name, &content)?;
+                op.edit_document(&vault, &existing, &title, &file_name, &content)?;
                 existing
             }
-            None => op::create_document(&vault, &title, &file_name, &content)?,
+            None => op.create_document(&vault, &title, &file_name, &content)?,
         };
 
         // Verify-then-delete: read the document back and byte-compare before we
         // ever remove the original from disk.
-        let round_trip = op::get_document(&vault, &id)?;
+        let round_trip = op.get_document(&vault, &id)?;
         if round_trip != content {
             bail!(
                 "Verification failed for {rel_file}: the copy in 1Password does not \
@@ -211,8 +211,8 @@ pub fn lock(cwd: &Path, keep: bool) -> Result<()> {
 // unlock
 // ---------------------------------------------------------------------------
 
-pub fn unlock(cwd: &Path) -> Result<()> {
-    op::assert_signed_in()?;
+pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
+    op.assert_signed_in()?;
 
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
@@ -223,7 +223,7 @@ pub fn unlock(cwd: &Path) -> Result<()> {
         bail!("{PROT_FILE} has no locked documents recorded. Nothing to unlock.");
     }
 
-    let vault = ensure_vault(&mut prot)?;
+    let vault = ensure_vault(op, &mut prot)?;
 
     let mut unlocked = 0;
     for (rel_file, id) in &prot.documents {
@@ -232,7 +232,7 @@ pub fn unlock(cwd: &Path) -> Result<()> {
             println!("  skip {rel_file} (already present on disk)");
             continue;
         }
-        let content = op::get_document(&vault, id)?;
+        let content = op.get_document(&vault, id)?;
         write_owner_only(&abs_file, &content)?;
         unlocked += 1;
         println!("  unlocked {rel_file} <- 1Password");
@@ -263,14 +263,14 @@ fn write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
 // bare `dotprot` — infer lock vs unlock from current state
 // ---------------------------------------------------------------------------
 
-pub fn toggle(cwd: &Path, keep: bool) -> Result<()> {
+pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
     let file = prot_path(cwd);
     let prot = prot::read(&file)?;
 
     // No .prot at all (or nothing recorded) -> first run -> lock.
     let prot = match prot {
         Some(p) if !p.documents.is_empty() => p,
-        _ => return lock(cwd, keep),
+        _ => return lock(op, cwd, keep),
     };
 
     // Compare recorded documents against what's on disk.
@@ -298,9 +298,207 @@ pub fn toggle(cwd: &Path, keep: bool) -> Result<()> {
 
     if !absent.is_empty() {
         // Everything recorded is missing -> restore. (--keep is a no-op here.)
-        unlock(cwd)
+        unlock(op, cwd)
     } else {
         // Everything recorded is present -> re-lock.
-        lock(cwd, keep)
+        lock(op, cwd, keep)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::op::OpBackend;
+    use std::cell::RefCell;
+
+    /// A fake [`OpBackend`] that records each call and stores "uploaded"
+    /// document bytes in memory, so tests can drive lock/unlock without a live
+    /// vault and assert the verify-then-delete ordering.
+    struct MockOp {
+        /// Ordered log of operations, for asserting sequencing.
+        calls: RefCell<Vec<String>>,
+        /// id -> bytes, as if stored in 1Password.
+        docs: RefCell<Vec<(String, Vec<u8>)>>,
+        /// When true, `get_document` returns bytes that differ from what was
+        /// uploaded — simulating a corrupted or partial upload on read-back.
+        corrupt_readback: bool,
+    }
+
+    impl MockOp {
+        fn new() -> Self {
+            MockOp {
+                calls: RefCell::new(Vec::new()),
+                docs: RefCell::new(Vec::new()),
+                corrupt_readback: false,
+            }
+        }
+
+        fn corrupting() -> Self {
+            let mut m = Self::new();
+            m.corrupt_readback = true;
+            m
+        }
+
+        fn store(&self, id: &str, content: &[u8]) {
+            let mut docs = self.docs.borrow_mut();
+            if let Some(entry) = docs.iter_mut().find(|(i, _)| i == id) {
+                entry.1 = content.to_vec();
+            } else {
+                docs.push((id.to_string(), content.to_vec()));
+            }
+        }
+    }
+
+    impl OpBackend for MockOp {
+        fn assert_signed_in(&self) -> Result<()> {
+            self.calls.borrow_mut().push("assert_signed_in".into());
+            Ok(())
+        }
+        fn find_vault(&self, _name: &str) -> Result<Option<String>> {
+            Ok(Some("VAULT".into()))
+        }
+        fn create_vault(&self, _name: &str, _description: &str) -> Result<String> {
+            Ok("VAULT".into())
+        }
+        fn create_document(
+            &self,
+            _vault: &str,
+            _title: &str,
+            _file_name: &str,
+            content: &[u8],
+        ) -> Result<String> {
+            self.calls.borrow_mut().push("create_document".into());
+            let id = format!("DOC{}", self.docs.borrow().len());
+            self.store(&id, content);
+            Ok(id)
+        }
+        fn edit_document(
+            &self,
+            _vault: &str,
+            id: &str,
+            _title: &str,
+            _file_name: &str,
+            content: &[u8],
+        ) -> Result<()> {
+            self.calls.borrow_mut().push("edit_document".into());
+            self.store(id, content);
+            Ok(())
+        }
+        fn get_document(&self, _vault: &str, id: &str) -> Result<Vec<u8>> {
+            self.calls.borrow_mut().push("get_document".into());
+            let bytes = self
+                .docs
+                .borrow()
+                .iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_default();
+            if self.corrupt_readback {
+                // Return something that won't match what's on disk.
+                Ok(b"CORRUPTED".to_vec())
+            } else {
+                Ok(bytes)
+            }
+        }
+    }
+
+    /// Write a `.prot` with a single `.env` pattern and a real `.env` file.
+    fn setup_dir(secret: &[u8]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), secret).unwrap();
+        let mut prot = ProtData::empty();
+        prot.vault = Some("VAULT".to_string());
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+        dir
+    }
+
+    #[test]
+    fn lock_deletes_only_after_successful_readback() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+
+        lock(&op, dir.path(), false).unwrap();
+
+        // File is gone, but only because the round-trip matched.
+        assert!(!dir.path().join(".env").exists(), ".env should be deleted");
+
+        // The read-back (get_document) must precede nothing destructive on disk,
+        // and must come after the upload. Verify the upload->verify ordering.
+        let calls = op.calls.borrow();
+        let upload = calls.iter().position(|c| c == "create_document").unwrap();
+        let verify = calls.iter().position(|c| c == "get_document").unwrap();
+        assert!(
+            upload < verify,
+            "upload must happen before read-back verify"
+        );
+
+        // The document id was persisted to .prot.
+        let prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        assert_eq!(prot.document_id(".env"), Some("DOC0"));
+    }
+
+    #[test]
+    fn lock_keeps_file_when_readback_mismatches() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::corrupting();
+
+        // The cardinal rule: a mismatched read-back must NOT delete the file.
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            dir.path().join(".env").exists(),
+            ".env must survive a failed verification"
+        );
+        assert!(
+            err.to_string().contains("Verification failed"),
+            "expected a verification-failed error, got: {err}"
+        );
+        // And we never recorded a (bogus) success in .prot.
+        let prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        assert_eq!(prot.document_id(".env"), None);
+    }
+
+    #[test]
+    fn lock_with_keep_uploads_and_verifies_but_does_not_delete() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+
+        lock(&op, dir.path(), true).unwrap();
+
+        assert!(
+            dir.path().join(".env").exists(),
+            "--keep must leave the file on disk"
+        );
+        // It was still uploaded and verified (id recorded), so the user can
+        // confirm the vault copy before trusting deletion.
+        let calls = op.calls.borrow();
+        assert!(calls.iter().any(|c| c == "get_document"), "must verify");
+        let prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        assert_eq!(prot.document_id(".env"), Some("DOC0"));
+    }
+
+    #[test]
+    fn unlock_restores_file_with_owner_only_mode() {
+        let dir = setup_dir(b"SECRET=restored\n");
+        let op = MockOp::new();
+
+        // Lock first (file gets deleted), then unlock to restore it.
+        lock(&op, dir.path(), false).unwrap();
+        assert!(!dir.path().join(".env").exists());
+
+        unlock(&op, dir.path()).unwrap();
+
+        let restored = fs::read(dir.path().join(".env")).unwrap();
+        assert_eq!(restored, b"SECRET=restored\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join(".env"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "restored file must be 0600");
+        }
     }
 }

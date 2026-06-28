@@ -43,12 +43,13 @@ enum Command {
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd: PathBuf = std::env::current_dir()?;
+    let op = op::RealOp;
 
     match cli.command {
-        None => commands::toggle(&cwd, cli.keep),
-        Some(Command::Setup) => commands::setup(),
-        Some(Command::Lock) => commands::lock(&cwd, cli.keep),
-        Some(Command::Unlock) => commands::unlock(&cwd),
+        None => commands::toggle(&op, &cwd, cli.keep),
+        Some(Command::Setup) => commands::setup(&op),
+        Some(Command::Lock) => commands::lock(&op, &cwd, cli.keep),
+        Some(Command::Unlock) => commands::unlock(&op, &cwd),
     }
 }
 
