@@ -80,6 +80,71 @@ fn parse_id(stdout: &[u8]) -> Result<String> {
     })
 }
 
+/// The 1Password operations dotprot performs, behind a trait so the
+/// safety-critical lock/unlock flow can be exercised against a mock.
+///
+/// The real implementation ([`RealOp`]) shells out to `op`; tests substitute a
+/// fake to assert ordering guarantees (e.g. that a file is never deleted when
+/// the read-back doesn't match) without touching a live vault.
+pub trait OpBackend {
+    fn assert_signed_in(&self) -> Result<()>;
+    fn find_vault(&self, name: &str) -> Result<Option<String>>;
+    fn create_vault(&self, name: &str, description: &str) -> Result<String>;
+    fn create_document(
+        &self,
+        vault: &str,
+        title: &str,
+        file_name: &str,
+        content: &[u8],
+    ) -> Result<String>;
+    fn edit_document(
+        &self,
+        vault: &str,
+        id: &str,
+        title: &str,
+        file_name: &str,
+        content: &[u8],
+    ) -> Result<()>;
+    fn get_document(&self, vault: &str, id: &str) -> Result<Vec<u8>>;
+}
+
+/// The production [`OpBackend`]: every call shells out to the `op` CLI.
+pub struct RealOp;
+
+impl OpBackend for RealOp {
+    fn assert_signed_in(&self) -> Result<()> {
+        assert_signed_in()
+    }
+    fn find_vault(&self, name: &str) -> Result<Option<String>> {
+        find_vault(name)
+    }
+    fn create_vault(&self, name: &str, description: &str) -> Result<String> {
+        create_vault(name, description)
+    }
+    fn create_document(
+        &self,
+        vault: &str,
+        title: &str,
+        file_name: &str,
+        content: &[u8],
+    ) -> Result<String> {
+        create_document(vault, title, file_name, content)
+    }
+    fn edit_document(
+        &self,
+        vault: &str,
+        id: &str,
+        title: &str,
+        file_name: &str,
+        content: &[u8],
+    ) -> Result<()> {
+        edit_document(vault, id, title, file_name, content)
+    }
+    fn get_document(&self, vault: &str, id: &str) -> Result<Vec<u8>> {
+        get_document(vault, id)
+    }
+}
+
 /// Verify `op` is installed and the user is signed in. Returns a friendly
 /// error otherwise.
 pub fn assert_signed_in() -> Result<()> {
@@ -181,8 +246,16 @@ pub fn create_document(
     parse_id(&stdout)
 }
 
-/// Replace an existing document's contents from raw bytes.
-pub fn edit_document(vault: &str, id: &str, file_name: &str, content: &[u8]) -> Result<()> {
+/// Replace an existing document's contents from raw bytes, keeping its title in
+/// sync (the title is the file's absolute path, which can change if the file is
+/// moved between locks).
+pub fn edit_document(
+    vault: &str,
+    id: &str,
+    title: &str,
+    file_name: &str,
+    content: &[u8],
+) -> Result<()> {
     let (_dir, path) = temp_file_with(file_name, content)?;
     let path_str = path.to_string_lossy();
     run_op(&[
@@ -192,6 +265,8 @@ pub fn edit_document(vault: &str, id: &str, file_name: &str, content: &[u8]) -> 
         &path_str,
         "--vault",
         vault,
+        "--title",
+        title,
         "--file-name",
         file_name,
     ])?;
@@ -201,13 +276,6 @@ pub fn edit_document(vault: &str, id: &str, file_name: &str, content: &[u8]) -> 
 /// Download a document's raw bytes by ID.
 pub fn get_document(vault: &str, id: &str) -> Result<Vec<u8>> {
     run_op(&["document", "get", id, "--vault", vault, "--force"])
-}
-
-/// Delete a document by ID.
-#[allow(dead_code)]
-pub fn delete_document(vault: &str, id: &str) -> Result<()> {
-    run_op(&["document", "delete", id, "--vault", vault])?;
-    Ok(())
 }
 
 #[cfg(test)]

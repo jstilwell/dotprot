@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Nothing yet.
 
+## [0.2.0] - 2026-06-28
+
+### Changed
+
+- Re-locking an existing file now also refreshes its 1Password document
+  **title** (the file's absolute path), so a moved file's vault entry no longer
+  keeps a stale title.
+- The bare `dotprot` "mixed state" error now lists exactly which recorded files
+  are present and which are missing, instead of just reporting counts.
+- During `lock`, a file-glob entry that can't be read (e.g. a permission error
+  while walking a directory) now prints a `warning: could not read … — skipped`
+  line instead of being dropped silently. One unreadable entry still doesn't
+  abort the lock, but it's no longer invisible — a file you meant to protect
+  won't be skipped without you knowing.
+
+### Security
+
+- The `.prot` state file is now written with owner-only (`0600`) permissions on
+  Unix when created, matching every other file dotprot writes. It holds no
+  secrets — only vault and document IDs — but it maps which 1Password documents
+  back this project, so it's no longer left world-readable. An existing
+  `.prot`'s permissions are left untouched.
+
 ## [0.1.0] - 2026-06-27
 
 Initial release. A self-contained Rust binary that locks `.env` (and any other
@@ -59,5 +82,6 @@ demand.
   immediately, and restored files are written with `0600` permissions.
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
-[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jstilwell/dotprot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jstilwell/dotprot/releases/tag/v0.1.0

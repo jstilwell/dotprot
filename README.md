@@ -21,7 +21,7 @@ round-trips correctly, and only then removes the file from disk.**
 
 ## Why?
 
-As a software engineer, I like using `.env` files but as a paranoid devops engineer, I know it's pretty dumb to leave a bunch of .env files on your disk. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files? Then it just felt like a no-brainer to create a little easy-to-use wrapper for 1Password CLI to lock `.env` files away inside of a 1Password vault and then retrieve them when I'm ready to work again.
+As a software engineer, I like using `.env` files but my paranoia doesn't allow for me to leave a bunch of .env files on my disk without worrying about it. I'm a big fan of the [1Password](https://1password.com/) password manager and I use its [CLI tool](https://1password.com/downloads/command-line) extensively. So I thought, why not use a 1Password vault to store my `.env` files? Then it just felt like a no-brainer to create a little easy-to-use wrapper for 1Password CLI to lock `.env` files away inside of a 1Password vault and then retrieve them when I'm ready to work again.
 
 ## Contents
 
@@ -204,7 +204,9 @@ after a verified, recoverable copy exists in 1Password.**
   or machines.
 - **Minimal on-disk exposure.** Secrets are handed to `op` via a short-lived
   `0600` temp file that's deleted immediately afterward (the 1Password CLI does
-  not reliably accept piped stdin).
+  not reliably accept piped stdin). Restored files and the `.prot` state file are
+  also written `0600` (newly created ones; an existing `.prot`'s mode is left as
+  you set it).
 
 > **Platform note (Windows):** the owner-only (`0600`) file-permission hardening
 > is currently enforced on **macOS and Linux only**. On Windows the temp and

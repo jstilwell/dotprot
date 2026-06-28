@@ -27,8 +27,11 @@ const HEADER_NOTE: &str = "# dotprot — managed below, do not edit";
 pub struct ProtData {
     /// Vault ID, once setup/lock has run.
     pub vault: Option<String>,
-    /// (file pattern as written by the user) -> 1Password document ID.
-    /// A Vec rather than a map to keep insertion order stable on round-trip.
+    /// (concrete relative file path) -> 1Password document ID. These are the
+    /// expanded paths a lock actually stored, not the user's glob patterns — a
+    /// pattern like `.env*` becomes one entry per matched file (`.env`,
+    /// `.env.local`, …). A Vec rather than a map to keep insertion order stable
+    /// on round-trip.
     pub documents: Vec<(String, String)>,
     /// User-maintained glob patterns of files to protect.
     pub patterns: Vec<String>,
@@ -44,21 +47,20 @@ impl ProtData {
         }
     }
 
-    /// Look up a recorded document ID for a pattern entry.
-    pub fn document_id(&self, pattern: &str) -> Option<&str> {
+    /// Look up a recorded document ID for a concrete file path.
+    pub fn document_id(&self, file: &str) -> Option<&str> {
         self.documents
             .iter()
-            .find(|(p, _)| p == pattern)
+            .find(|(p, _)| p == file)
             .map(|(_, id)| id.as_str())
     }
 
-    /// Insert or update the document ID for a pattern entry.
-    pub fn set_document(&mut self, pattern: &str, id: &str) {
-        if let Some(entry) = self.documents.iter_mut().find(|(p, _)| p == pattern) {
+    /// Insert or update the document ID for a concrete file path.
+    pub fn set_document(&mut self, file: &str, id: &str) {
+        if let Some(entry) = self.documents.iter_mut().find(|(p, _)| p == file) {
             entry.1 = id.to_string();
         } else {
-            self.documents
-                .push((pattern.to_string(), id.to_string()));
+            self.documents.push((file.to_string(), id.to_string()));
         }
     }
 }
@@ -132,9 +134,25 @@ pub fn read(path: &Path) -> Result<Option<ProtData>> {
     }
 }
 
-/// Serialize and write `.prot`.
+/// Serialize and write `.prot` with owner-only (`0600`) permissions on Unix.
+///
+/// `.prot` holds no secrets — only vault and document IDs — but it is a precise
+/// map of which 1Password documents hold this project's secrets, so we keep it
+/// as locked down as every other file dotprot writes.
 pub fn write(path: &Path, data: &ProtData) -> Result<()> {
-    fs::write(path, serialize(data)).with_context(|| format!("writing {}", path.display()))
+    use std::io::Write;
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    f.write_all(serialize(data).as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
@@ -227,5 +245,17 @@ mod tests {
             vec![".env".to_string(), ".env.local".to_string()]
         );
         assert_eq!(p.vault, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_creates_prot_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".prot");
+        write(&path, &ProtData::empty()).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        // Only the low 9 permission bits matter here.
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
     }
 }
