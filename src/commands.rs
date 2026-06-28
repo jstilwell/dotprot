@@ -13,6 +13,68 @@ pub const VAULT_NAME: &str = ".prot";
 const PROT_FILE: &str = ".prot";
 const VAULT_DESCRIPTION: &str = "Managed by dotprot — protected .env and config files.";
 
+/// Ensure the user is signed in to 1Password before running a command.
+///
+/// The default entry point used by the commands; it asks the user via an
+/// interactive terminal prompt. See [`ensure_signed_in_with`] for the testable
+/// core that takes the confirmation decision as a parameter.
+fn ensure_signed_in(op: &impl OpBackend) -> Result<()> {
+    ensure_signed_in_with(op, || {
+        prompt_yes_no("You are not signed in to 1Password. Sign in now?")
+    })
+}
+
+/// Core of [`ensure_signed_in`], with the "should we sign in?" decision injected
+/// so it can be exercised without a real terminal.
+///
+/// If already signed in, returns immediately. Otherwise `confirm` decides
+/// whether to run `op signin`; the production path makes that an interactive
+/// prompt that is itself a no (false) in non-interactive contexts, so CI and
+/// pipes never hang — they fall back to the same clear error as before.
+fn ensure_signed_in_with(
+    op: &impl OpBackend,
+    confirm: impl FnOnce() -> Result<bool>,
+) -> Result<()> {
+    if op.is_signed_in()? {
+        return Ok(());
+    }
+
+    if !confirm()? {
+        bail!("You are not signed in to 1Password. Run `op signin` first.");
+    }
+
+    op.sign_in()?;
+
+    // `op signin` reported success; confirm the session is actually usable
+    // before we proceed to touch any protected files.
+    if op.is_signed_in()? {
+        Ok(())
+    } else {
+        bail!("Still not signed in to 1Password after `op signin`. Aborting.");
+    }
+}
+
+/// Ask a yes/no question on the terminal, defaulting to "no".
+///
+/// Returns `Ok(false)` without prompting when stdin/stdout isn't an interactive
+/// terminal, so non-interactive runs (CI, pipes) fail fast with a clear error
+/// rather than blocking on input that will never arrive.
+fn prompt_yes_no(question: &str) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return Ok(false);
+    }
+
+    print!("{question} [y/N] ");
+    std::io::stdout().flush().ok();
+
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 fn prot_path(cwd: &Path) -> PathBuf {
     cwd.join(PROT_FILE)
 }
@@ -77,7 +139,7 @@ fn file_exists(p: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 pub fn setup(op: &impl OpBackend) -> Result<()> {
-    op.assert_signed_in()?;
+    ensure_signed_in(op)?;
 
     if let Some(id) = op.find_vault(VAULT_NAME)? {
         println!("Vault \"{VAULT_NAME}\" already exists ({id}).");
@@ -119,7 +181,7 @@ fn ensure_vault(op: &impl OpBackend, prot: &mut ProtData) -> Result<String> {
 /// disk — useful for confirming the vault copy yourself before trusting
 /// dotprot to remove anything.
 pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
-    op.assert_signed_in()?;
+    ensure_signed_in(op)?;
 
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
@@ -212,7 +274,7 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
-    op.assert_signed_in()?;
+    ensure_signed_in(op)?;
 
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
@@ -322,6 +384,12 @@ mod tests {
         /// When true, `get_document` returns bytes that differ from what was
         /// uploaded — simulating a corrupted or partial upload on read-back.
         corrupt_readback: bool,
+        /// Current sign-in state. `sign_in()` flips it to true, modelling a
+        /// successful `op signin`.
+        signed_in: RefCell<bool>,
+        /// When true, `sign_in()` does NOT flip `signed_in` — modelling a user
+        /// who cancels the auth or whose session still isn't usable afterward.
+        signin_fails: bool,
     }
 
     impl MockOp {
@@ -330,6 +398,8 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 docs: RefCell::new(Vec::new()),
                 corrupt_readback: false,
+                signed_in: RefCell::new(true),
+                signin_fails: false,
             }
         }
 
@@ -337,6 +407,18 @@ mod tests {
             let mut m = Self::new();
             m.corrupt_readback = true;
             m
+        }
+
+        /// A backend that starts signed out. `sign_in()` will flip it to
+        /// signed-in unless `signin_fails` is also set.
+        fn signed_out() -> Self {
+            let m = Self::new();
+            *m.signed_in.borrow_mut() = false;
+            m
+        }
+
+        fn called(&self, name: &str) -> bool {
+            self.calls.borrow().iter().any(|c| c == name)
         }
 
         fn store(&self, id: &str, content: &[u8]) {
@@ -350,8 +432,15 @@ mod tests {
     }
 
     impl OpBackend for MockOp {
-        fn assert_signed_in(&self) -> Result<()> {
-            self.calls.borrow_mut().push("assert_signed_in".into());
+        fn is_signed_in(&self) -> Result<bool> {
+            self.calls.borrow_mut().push("is_signed_in".into());
+            Ok(*self.signed_in.borrow())
+        }
+        fn sign_in(&self) -> Result<()> {
+            self.calls.borrow_mut().push("sign_in".into());
+            if !self.signin_fails {
+                *self.signed_in.borrow_mut() = true;
+            }
             Ok(())
         }
         fn find_vault(&self, _name: &str) -> Result<Option<String>> {
@@ -500,5 +589,71 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "restored file must be 0600");
         }
+    }
+
+    // --- sign-in orchestration --------------------------------------------
+
+    #[test]
+    fn ensure_signed_in_is_noop_when_already_signed_in() {
+        let op = MockOp::new(); // starts signed in
+        ensure_signed_in_with(&op, || panic!("must not prompt when already signed in")).unwrap();
+        assert!(
+            !op.called("sign_in"),
+            "must not sign in when already signed in"
+        );
+    }
+
+    #[test]
+    fn ensure_signed_in_signs_in_when_user_confirms() {
+        let op = MockOp::signed_out();
+        // User says yes.
+        ensure_signed_in_with(&op, || Ok(true)).unwrap();
+        assert!(op.called("sign_in"), "should have run sign_in on confirm");
+    }
+
+    #[test]
+    fn ensure_signed_in_errors_and_skips_signin_when_user_declines() {
+        let op = MockOp::signed_out();
+        // User says no (this is also the non-interactive fallback: confirm = false).
+        let err = ensure_signed_in_with(&op, || Ok(false)).unwrap_err();
+        assert!(
+            err.to_string().contains("not signed in"),
+            "expected a not-signed-in error, got: {err}"
+        );
+        assert!(
+            !op.called("sign_in"),
+            "must not sign in when the user declines / non-interactive"
+        );
+    }
+
+    #[test]
+    fn ensure_signed_in_errors_when_signin_does_not_take() {
+        let mut op = MockOp::signed_out();
+        op.signin_fails = true; // op signin "succeeds" but session still unusable
+        let err = ensure_signed_in_with(&op, || Ok(true)).unwrap_err();
+        assert!(
+            err.to_string().contains("Still not signed in"),
+            "expected a post-signin failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lock_aborts_without_touching_files_when_not_signed_in() {
+        let dir = setup_dir(b"SECRET=1\n");
+        // Signed out; non-interactive test harness means the prompt resolves to
+        // "no", so lock must bail before uploading or deleting anything.
+        let op = MockOp::signed_out();
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(err.to_string().contains("not signed in"));
+        assert!(
+            dir.path().join(".env").exists(),
+            ".env must be untouched when not signed in"
+        );
+        assert!(
+            !op.called("create_document"),
+            "must not upload when signed out"
+        );
     }
 }
