@@ -33,6 +33,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check affects normal lock/unlock round-trips, which only ever record plain
   relative paths.
 
+### Fixed
+
+- Locking now works in project directories whose path contains glob
+  metacharacters (`[`, `]`, `?`, `*`) — previously the directory portion of the
+  pattern was interpreted as glob syntax and matching silently failed with "No
+  files match".
+- A `.prot` pattern that matches files **outside** the working directory (e.g.
+  `../shared/.env`) now prints a loud warning instead of being skipped
+  silently — the file was never protected, but the user had no way to know.
+- A matched filename containing control characters (e.g. a newline) is now
+  skipped with a warning instead of corrupting `.prot`'s line-oriented format
+  after the original file was already deleted.
+
 ### Changed
 
 - `unlock` no longer creates the `.prot` vault when it can't be found — a

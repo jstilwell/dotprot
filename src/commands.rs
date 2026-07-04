@@ -85,11 +85,15 @@ fn prot_path(cwd: &Path) -> PathBuf {
 fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
     let mut matches: BTreeSet<String> = BTreeSet::new();
 
+    // The working directory becomes the literal prefix of every glob, so any
+    // metacharacters in it (`[`, `?`, `*` — brackets in directory names are
+    // real) must be escaped or matching silently fails.
+    let escaped_cwd = glob::Pattern::escape(&cwd.to_string_lossy());
+
     for pattern in patterns {
         // Resolve the glob relative to cwd, then store the path back as a
         // cwd-relative string so document titles and .prot keys stay stable.
-        let abs_pattern = cwd.join(pattern);
-        let abs_pattern = abs_pattern.to_string_lossy();
+        let abs_pattern = format!("{escaped_cwd}{}{pattern}", std::path::MAIN_SEPARATOR);
         for entry in glob::glob(&abs_pattern)? {
             let path = match entry {
                 Ok(p) => p,
@@ -106,11 +110,37 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
             if !path.is_file() {
                 continue;
             }
-            if let Ok(rel) = path.strip_prefix(cwd) {
-                let rel = rel.to_string_lossy().to_string();
-                if rel != PROT_FILE {
-                    matches.insert(rel);
-                }
+            // A pattern like `../shared/.env` can match outside the working
+            // directory. strip_prefix is lexical — `cwd/../x` still "strips" —
+            // so any remaining `..` component also means the file is outside.
+            // dotprot only protects files under cwd; say so loudly, or the
+            // user will believe the file is locked while it sits in plaintext.
+            let rel = path.strip_prefix(cwd).ok().filter(|rel| {
+                !rel.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            });
+            let Some(rel) = rel else {
+                eprintln!(
+                    "  warning: {} is outside {} — skipped (dotprot only \
+                     protects files inside the working directory)",
+                    path.display(),
+                    cwd.display()
+                );
+                continue;
+            };
+            let rel = rel.to_string_lossy().to_string();
+            if rel.chars().any(|c| c.is_control()) {
+                // .prot is a line-oriented format; a control character (e.g. a
+                // newline in the filename) would corrupt the recorded document
+                // id after the original file is already deleted.
+                eprintln!(
+                    "  warning: {rel:?} has control characters in its name — \
+                     skipped (unsupported in {PROT_FILE})"
+                );
+                continue;
+            }
+            if rel != PROT_FILE {
+                matches.insert(rel);
             }
         }
     }
@@ -763,6 +793,58 @@ mod tests {
         assert!(
             !dir.path().join("../escaped.env").exists(),
             "nothing may be written outside the working directory"
+        );
+    }
+
+    // --- pattern expansion --------------------------------------------------
+
+    #[test]
+    fn lock_works_in_directory_with_glob_metacharacters() {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("we[i]rd dir");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join(".env"), b"SECRET=1\n").unwrap();
+        let mut prot = ProtData::empty();
+        prot.vault = Some("VAULT".to_string());
+        prot::write(&dir.join(PROT_FILE), &prot).unwrap();
+
+        let op = MockOp::new();
+        lock(&op, &dir, false).unwrap();
+
+        assert!(
+            !dir.join(".env").exists(),
+            ".env must lock even when the project path contains [ ] metacharacters"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_skips_matches_outside_the_working_directory() {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("project");
+        fs::create_dir(&dir).unwrap();
+        fs::write(outer.path().join("outside.env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(&dir, &["../outside.env".to_string()]).unwrap();
+
+        assert!(
+            matches.is_empty(),
+            "files outside cwd must not be treated as protectable: {matches:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_patterns_skips_filenames_with_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env\nx"), b"SECRET=1\n").unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &[".env*".to_string()]).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string()],
+            "a newline in a filename would corrupt the .prot line format"
         );
     }
 
