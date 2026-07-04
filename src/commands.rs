@@ -270,7 +270,8 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         }
     };
 
-    let vault = resolve_vault(op, &mut prot, true)?;
+    // Expand patterns first: it's free local work, and bailing on an empty
+    // match must not cost the network round-trip that vault resolution takes.
     let files = expand_patterns(cwd, &prot.patterns)?;
 
     if files.is_empty() {
@@ -280,6 +281,8 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
             prot.patterns.join(", ")
         );
     }
+
+    let vault = resolve_vault(op, &mut prot, true)?;
 
     let mut locked = 0;
     for rel_file in &files {
@@ -513,7 +516,12 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
     }
 
     if !absent.is_empty() {
-        // Everything recorded is missing -> restore. (--keep is a no-op here.)
+        // Everything recorded is missing -> restore. Same note the explicit
+        // `unlock --keep` prints — the flag must not be swallowed silently on
+        // either entry path.
+        if keep {
+            eprintln!("note: --keep has no effect on unlock (nothing is deleted).");
+        }
         unlock(op, cwd)
     } else {
         // Everything recorded is present -> re-lock.

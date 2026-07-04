@@ -65,8 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `unlock` no longer creates the `.prot` vault when it can't be found — a
   fresh, empty vault could never contain the recorded documents, so it now
   errors clearly instead. (Only `lock` and `setup` create the vault.)
-- `dotprot unlock --keep` now prints a note that `--keep` has no effect on
-  unlock, instead of silently ignoring the flag.
+- `dotprot unlock --keep` — and bare `dotprot --keep` when the toggle resolves
+  to an unlock — now prints a note that `--keep` has no effect on unlock,
+  instead of silently ignoring the flag.
+- `dotprot lock` with nothing to lock now bails before contacting 1Password,
+  instead of spending a network round-trip first.
 
 ## [0.3.0] - 2026-06-28
 
