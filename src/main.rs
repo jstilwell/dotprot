@@ -1,5 +1,6 @@
 //! dotprot — lock up .env files (and anything in .prot) inside a 1Password vault.
 
+mod backup;
 mod commands;
 mod op;
 mod prot;
@@ -38,17 +39,21 @@ enum Command {
     Lock,
     /// Force unlock: restore files from 1Password.
     Unlock,
+    /// Recover this directory's .prot file from its local backup (~/.prot).
+    Restore,
 }
 
 fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let cwd: PathBuf = std::env::current_dir()?;
+    let home = std::env::home_dir();
     let op = op::RealOp;
 
     match cli.command {
-        None => commands::toggle(&op, &cwd, cli.keep),
+        None => commands::toggle(&op, &cwd, cli.keep, home.as_deref()),
         Some(Command::Setup) => commands::setup(&op),
-        Some(Command::Lock) => commands::lock(&op, &cwd, cli.keep),
+        Some(Command::Lock) => commands::lock(&op, &cwd, cli.keep, home.as_deref()),
+        Some(Command::Restore) => commands::restore(&cwd, home.as_deref()),
         Some(Command::Unlock) => {
             // --keep is a global flag so clap accepts it here; unlock never
             // deletes anything, so say so rather than silently ignoring it.

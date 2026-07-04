@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::backup;
 use crate::op::OpBackend;
 use crate::prot::{self, ProtData};
 
 pub const VAULT_NAME: &str = ".prot";
-const PROT_FILE: &str = ".prot";
+pub const PROT_FILE: &str = ".prot";
 const VAULT_DESCRIPTION: &str = "Managed by dotprot — protected .env and config files.";
 
 /// Ensure the user is signed in to 1Password before running a command.
@@ -77,6 +78,21 @@ fn prompt_yes_no(question: &str) -> Result<bool> {
 
 fn prot_path(cwd: &Path) -> PathBuf {
     cwd.join(PROT_FILE)
+}
+
+/// Mirror the just-written `.prot` to its backup under `~/.prot/backups`.
+///
+/// Strictly best-effort: `.prot` on disk is already correct, and a backup
+/// problem (no home dir, a read-only home, …) must never abort a lock that is
+/// otherwise proceeding safely — so failures warn loudly and carry on.
+fn backup_prot(home: Option<&Path>, cwd: &Path, data: &ProtData) {
+    let Some(home) = home else {
+        eprintln!("  warning: could not determine your home directory — {PROT_FILE} not backed up");
+        return;
+    };
+    if let Err(e) = backup::save(home, cwd, data) {
+        eprintln!("  warning: could not back up {PROT_FILE}: {e:#}");
+    }
 }
 
 /// Expand the user's patterns against the working dir into concrete relative
@@ -252,7 +268,7 @@ fn resolve_vault(
 /// With `keep = true`, files are uploaded and verified but NOT deleted from
 /// disk — useful for confirming the vault copy yourself before trusting
 /// dotprot to remove anything.
-pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
+pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool, home: Option<&Path>) -> Result<()> {
     ensure_signed_in(op)?;
 
     let file = prot_path(cwd);
@@ -262,6 +278,7 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
             // Auto-create on first lock, defaulting to .env*.
             let p = ProtData::empty();
             prot::write(&file, &p)?;
+            backup_prot(home, cwd, &p);
             println!(
                 "Created {PROT_FILE} (protecting: {}).",
                 p.patterns.join(", ")
@@ -325,8 +342,10 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         prot.set_document(rel_file, &id);
         // Persist the document id (and vault) immediately, before deleting the
         // file. If a later file fails, everything locked so far is recorded in
-        // .prot and recoverable.
+        // .prot and recoverable. The backup mirror keeps ~/.prot in step so
+        // `dotprot restore` always has the latest state.
         prot::write(&file, &prot)?;
+        backup_prot(home, cwd, &prot);
         if keep {
             println!("  uploaded {rel_file} -> 1Password (kept on disk)");
         } else {
@@ -472,17 +491,67 @@ fn validate_restore_path(rel_file: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// restore — bring back a lost .prot from its local backup
+// ---------------------------------------------------------------------------
+
+/// Restore this directory's `.prot` from its backup under `~/.prot/backups`.
+///
+/// Purely local — no 1Password sign-in involved. The backup is the state as of
+/// the last time dotprot wrote `.prot` here, so a restored file immediately
+/// supports `dotprot unlock`.
+pub fn restore(cwd: &Path, home: Option<&Path>) -> Result<()> {
+    let Some(home) = home else {
+        bail!("Could not determine your home directory, so there is no backup location to read.");
+    };
+    let backup_file = backup::backup_file(home, cwd);
+    let file = prot_path(cwd);
+
+    let backup_bytes = match fs::read(&backup_file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "No backup of {PROT_FILE} found for {} (looked at {}).\n\
+             dotprot backs up {PROT_FILE} whenever it writes it — has \
+             `dotprot lock` run in this directory before?",
+            cwd.display(),
+            backup_file.display()
+        ),
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading backup {}", backup_file.display()))
+        }
+    };
+
+    if file_exists(&file) {
+        let current =
+            fs::read(&file).with_context(|| format!("reading existing {}", file.display()))?;
+        if current == backup_bytes {
+            println!("{PROT_FILE} already matches its backup — nothing to restore.");
+            return Ok(());
+        }
+        bail!(
+            "A {PROT_FILE} already exists here and differs from the backup \
+             ({}).\nRefusing to overwrite it — move it aside first if you \
+             really want the backup.",
+            backup_file.display()
+        );
+    }
+
+    write_owner_only(&file, &backup_bytes)?;
+    println!("Restored {PROT_FILE} from {}.", backup_file.display());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // bare `dotprot` — infer lock vs unlock from current state
 // ---------------------------------------------------------------------------
 
-pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
+pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool, home: Option<&Path>) -> Result<()> {
     let file = prot_path(cwd);
     let prot = prot::read(&file)?;
 
     // No .prot at all (or nothing recorded) -> first run -> lock.
     let prot = match prot {
         Some(p) if !p.documents.is_empty() => p,
-        _ => return lock(op, cwd, keep),
+        _ => return lock(op, cwd, keep, home),
     };
 
     // The recorded paths are untrusted input here too: they steer the
@@ -525,7 +594,7 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         unlock(op, cwd)
     } else {
         // Everything recorded is present -> re-lock.
-        lock(op, cwd, keep)
+        lock(op, cwd, keep, home)
     }
 }
 
@@ -690,7 +759,7 @@ mod tests {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
 
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // File is gone, but only because the round-trip matched.
         assert!(!dir.path().join(".env").exists(), ".env should be deleted");
@@ -716,7 +785,7 @@ mod tests {
         let op = MockOp::corrupting();
 
         // The cardinal rule: a mismatched read-back must NOT delete the file.
-        let err = lock(&op, dir.path(), false).unwrap_err();
+        let err = lock(&op, dir.path(), false, None).unwrap_err();
 
         assert!(
             dir.path().join(".env").exists(),
@@ -736,7 +805,7 @@ mod tests {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
 
-        lock(&op, dir.path(), true).unwrap();
+        lock(&op, dir.path(), true, None).unwrap();
 
         assert!(
             dir.path().join(".env").exists(),
@@ -756,7 +825,7 @@ mod tests {
         let op = MockOp::new();
 
         // Lock first (file gets deleted), then unlock to restore it.
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
         assert!(!dir.path().join(".env").exists());
 
         unlock(&op, dir.path()).unwrap();
@@ -783,7 +852,7 @@ mod tests {
         // during the verify step — deleting it would lose the new contents.
         op.rewrite_on_get = Some((dir.path().join(".env"), b"SECRET=2\n".to_vec()));
 
-        let err = lock(&op, dir.path(), false).unwrap_err();
+        let err = lock(&op, dir.path(), false, None).unwrap_err();
 
         assert!(
             err.to_string().contains("changed on disk"),
@@ -801,7 +870,7 @@ mod tests {
     fn unlock_refuses_to_write_through_dangling_symlink() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // Plant a dangling symlink where .env used to be. `file_exists` reads
         // it as absent (try_exists follows links), so unlock proceeds — but the
@@ -824,7 +893,7 @@ mod tests {
     fn unlock_rejects_paths_that_escape_the_directory() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // Simulate a tampered .prot: rewrite the recorded entry to a traversal
         // path pointing outside the working directory.
@@ -848,7 +917,7 @@ mod tests {
     fn unlock_reports_missing_parent_directory_accurately() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // A nested path whose directory is absent (e.g. a fresh clone — git
         // can't track the now-empty dir). The error must point at the missing
@@ -897,7 +966,7 @@ mod tests {
     fn unlock_validates_all_paths_before_restoring_anything() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // Tamper: a good entry first, a traversal entry second. Unlock must
         // fail atomically — the good file must NOT be restored first.
@@ -922,7 +991,7 @@ mod tests {
     fn toggle_rejects_tampered_document_paths() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // A tampered absolute entry must not let toggle probe (and echo the
         // existence of) paths outside the project.
@@ -931,7 +1000,7 @@ mod tests {
         prot.documents.push(("/etc/hosts".to_string(), id));
         prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
 
-        let err = toggle(&op, dir.path(), false).unwrap_err();
+        let err = toggle(&op, dir.path(), false, None).unwrap_err();
         assert!(
             err.to_string().contains("Refusing to restore"),
             "expected toggle to reject the tampered path, got: {err}"
@@ -951,7 +1020,7 @@ mod tests {
         prot::write(&dir.join(PROT_FILE), &prot).unwrap();
 
         let op = MockOp::new();
-        lock(&op, &dir, false).unwrap();
+        lock(&op, &dir, false, None).unwrap();
 
         assert!(
             !dir.join(".env").exists(),
@@ -1040,6 +1109,106 @@ mod tests {
         );
     }
 
+    // --- .prot backup & restore ---------------------------------------------
+
+    #[test]
+    fn lock_mirrors_prot_to_the_home_backup() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let home = tempfile::tempdir().unwrap();
+        let op = MockOp::new();
+
+        lock(&op, dir.path(), false, Some(home.path())).unwrap();
+
+        let backup = crate::backup::backup_file(home.path(), dir.path());
+        let backed_up = prot::read(&backup).unwrap().expect("backup must exist");
+        assert_eq!(
+            backed_up.document_id(".env"),
+            Some("DOC0"),
+            "backup must carry the recorded document id"
+        );
+    }
+
+    #[test]
+    fn restore_recovers_a_deleted_prot() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let home = tempfile::tempdir().unwrap();
+        let op = MockOp::new();
+        lock(&op, dir.path(), false, Some(home.path())).unwrap();
+
+        // The accident: .prot is gone.
+        fs::remove_file(dir.path().join(PROT_FILE)).unwrap();
+
+        restore(dir.path(), Some(home.path())).unwrap();
+
+        let recovered = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        assert_eq!(
+            recovered.document_id(".env"),
+            Some("DOC0"),
+            "restored .prot must still map .env to its document"
+        );
+        // The restored file immediately supports unlock.
+        unlock(&op, dir.path()).unwrap();
+        assert_eq!(fs::read(dir.path().join(".env")).unwrap(), b"SECRET=1\n");
+    }
+
+    #[test]
+    fn restore_is_a_noop_when_prot_matches_the_backup() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let home = tempfile::tempdir().unwrap();
+        let op = MockOp::new();
+        lock(&op, dir.path(), false, Some(home.path())).unwrap();
+
+        let before = fs::read(dir.path().join(PROT_FILE)).unwrap();
+        restore(dir.path(), Some(home.path())).unwrap();
+        assert_eq!(fs::read(dir.path().join(PROT_FILE)).unwrap(), before);
+    }
+
+    #[test]
+    fn restore_refuses_to_overwrite_a_differing_prot() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let home = tempfile::tempdir().unwrap();
+        let op = MockOp::new();
+        lock(&op, dir.path(), false, Some(home.path())).unwrap();
+
+        // The local .prot has since diverged from the backup.
+        fs::write(dir.path().join(PROT_FILE), b"hand-edited\n").unwrap();
+
+        let err = restore(dir.path(), Some(home.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing to overwrite"),
+            "expected an overwrite refusal, got: {err}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(PROT_FILE)).unwrap(),
+            b"hand-edited\n",
+            "the diverged .prot must be left untouched"
+        );
+    }
+
+    #[test]
+    fn restore_errors_clearly_when_no_backup_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        let err = restore(dir.path(), Some(home.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("No backup"),
+            "expected a no-backup error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lock_succeeds_even_when_backup_location_is_unavailable() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+
+        // No home dir at all: the backup is skipped with a warning, but the
+        // lock itself must proceed normally.
+        lock(&op, dir.path(), false, None).unwrap();
+
+        assert!(!dir.path().join(".env").exists(), ".env should still lock");
+    }
+
     // --- vault resolution ---------------------------------------------------
 
     #[test]
@@ -1050,7 +1219,7 @@ mod tests {
         // (tampered or copy-pasted .prot).
         op.vault_name_response = Some("Personal".to_string());
 
-        let err = lock(&op, dir.path(), false).unwrap_err();
+        let err = lock(&op, dir.path(), false, None).unwrap_err();
 
         assert!(
             err.to_string().contains("is named \"Personal\""),
@@ -1069,7 +1238,7 @@ mod tests {
         let mut op = MockOp::new();
         op.vault_name_response = None; // recorded vault ID resolves to nothing
 
-        let err = lock(&op, dir.path(), false).unwrap_err();
+        let err = lock(&op, dir.path(), false, None).unwrap_err();
 
         assert!(
             err.to_string().contains("was not found"),
@@ -1082,7 +1251,7 @@ mod tests {
     fn unlock_errors_instead_of_creating_a_missing_vault() {
         let dir = setup_dir(b"SECRET=1\n");
         let op = MockOp::new();
-        lock(&op, dir.path(), false).unwrap();
+        lock(&op, dir.path(), false, None).unwrap();
 
         // Simulate a .prot with documents recorded but no usable vault: drop
         // the cached ID and make the by-name lookup come up empty.
@@ -1158,7 +1327,7 @@ mod tests {
         // "no", so lock must bail before uploading or deleting anything.
         let op = MockOp::signed_out();
 
-        let err = lock(&op, dir.path(), false).unwrap_err();
+        let err = lock(&op, dir.path(), false, None).unwrap_err();
 
         assert!(err.to_string().contains("not signed in"));
         assert!(
