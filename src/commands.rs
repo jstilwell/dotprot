@@ -93,7 +93,15 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
     for pattern in patterns {
         // Resolve the glob relative to cwd, then store the path back as a
         // cwd-relative string so document titles and .prot keys stay stable.
-        let abs_pattern = format!("{escaped_cwd}{}{pattern}", std::path::MAIN_SEPARATOR);
+        // A rooted/absolute pattern stands alone (Path::join semantics — the
+        // base is replaced): gluing it onto cwd would silently re-anchor
+        // `/shared/x.env` at `<cwd>/shared/x.env`, a different file that
+        // could then be locked and deleted.
+        let abs_pattern = if Path::new(pattern).has_root() {
+            cwd.join(pattern).to_string_lossy().into_owned()
+        } else {
+            format!("{escaped_cwd}{}{pattern}", std::path::MAIN_SEPARATOR)
+        };
         for entry in glob::glob(&abs_pattern)? {
             let path = match entry {
                 Ok(p) => p,
@@ -914,6 +922,37 @@ mod tests {
             matches.is_empty(),
             "files outside cwd must not be treated as protectable: {matches:?}"
         );
+    }
+
+    #[test]
+    fn expand_patterns_does_not_reanchor_absolute_patterns_under_cwd() {
+        // Regression test: an absolute pattern must keep Path::join semantics
+        // (the pattern stands alone). Concatenating it onto cwd would make
+        // `/shared/x.env` match `<cwd>/shared/x.env` — a different file that
+        // lock would then upload and DELETE.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("shared")).unwrap();
+        fs::write(dir.path().join("shared/x.env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &["/shared/x.env".to_string()]).unwrap();
+
+        assert!(
+            matches.is_empty(),
+            "an absolute pattern must not match a cwd-relative file: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_matches_absolute_pattern_inside_cwd() {
+        // An absolute pattern that names a file inside the project worked
+        // before the glob-escaping change and must keep working.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+        let abs = dir.path().join(".env").to_string_lossy().to_string();
+
+        let matches = expand_patterns(dir.path(), &[abs]).unwrap();
+
+        assert_eq!(matches, vec![".env".to_string()]);
     }
 
     #[cfg(unix)]
