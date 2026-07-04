@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `.prot` is now written **atomically** (temp file + rename in the same
+  directory), so a crash or power loss mid-write can no longer leave it
+  truncated or half-written. `.prot` is the only local map from
+  already-deleted files to their 1Password documents, so corrupting it meant
+  recovering document IDs by hand from the 1Password UI. An existing `.prot`'s
+  permissions are still preserved; new files remain `0600` on Unix.
 - Locking now works in project directories whose path contains glob
   metacharacters (`[`, `]`, `?`, `*`) — previously the directory portion of the
   pattern was interpreted as glob syntax and matching silently failed with "No

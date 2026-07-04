@@ -201,7 +201,9 @@ after a verified, recoverable copy exists in 1Password.**
   before every run, so a stale or tampered ID can't point writes at another
   vault in your account.
 - **Incremental persistence.** `.prot` is updated after _each_ file locks, so an
-  interruption mid-batch leaves you in a consistent, recoverable state.
+  interruption mid-batch leaves you in a consistent, recoverable state. Each
+  update is written atomically (temp file + rename), so even a crash mid-write
+  can't corrupt the recorded document IDs.
 - **Backups are kept.** Documents stay in 1Password after unlock, so a directory
   stays re-lockable and you always have a copy. Re-locking overwrites the
   existing document in place.
