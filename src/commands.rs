@@ -151,21 +151,51 @@ pub fn setup(op: &impl OpBackend) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the vault ID, finding it if not already cached in `prot`. If the
-/// vault doesn't exist in 1Password yet, create it (a one-time action) and
-/// announce it clearly so the user knows a vault was made in their account.
-fn ensure_vault(op: &impl OpBackend, prot: &mut ProtData) -> Result<String> {
-    if let Some(v) = &prot.vault {
-        return Ok(v.clone());
+/// Resolve the 1Password vault ID to use for this run.
+///
+/// If `.prot` records a vault ID, verify it still refers to a vault actually
+/// named ".prot" before using it. The ID is user-editable (and often committed
+/// to version control), so trusting it blindly would let a tampered or
+/// copy-pasted value silently point dotprot's document writes at some other
+/// vault in the account.
+///
+/// Otherwise look the vault up by name. `create_if_missing` decides whether a
+/// missing vault is created (lock — a one-time action, announced clearly) or
+/// an error (unlock — a fresh empty vault could never contain the recorded
+/// documents, so creating one only muddies the account).
+fn resolve_vault(
+    op: &impl OpBackend,
+    prot: &mut ProtData,
+    create_if_missing: bool,
+) -> Result<String> {
+    if let Some(id) = &prot.vault {
+        return match op.vault_name(id)? {
+            Some(name) if name == VAULT_NAME => Ok(id.clone()),
+            Some(name) => bail!(
+                "The vault recorded in {PROT_FILE} ({id}) is named \"{name}\", not \
+                 \"{VAULT_NAME}\". Refusing to touch it. If that vault was renamed, \
+                 rename it back; if the ID is stale, remove the `vault:` line from \
+                 {PROT_FILE} and rerun."
+            ),
+            None => bail!(
+                "The vault recorded in {PROT_FILE} ({id}) was not found in your \
+                 1Password account. If it was deleted, remove the `vault:` line \
+                 from {PROT_FILE} and rerun."
+            ),
+        };
     }
     let id = match op.find_vault(VAULT_NAME)? {
         Some(found) => found,
-        None => {
+        None if create_if_missing => {
             let created = op.create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
             println!("Created 1Password vault \"{VAULT_NAME}\" ({created}).");
             println!("(one-time setup — future runs reuse it)");
             created
         }
+        None => bail!(
+            "No \"{VAULT_NAME}\" vault found in your 1Password account, but \
+             {PROT_FILE} has documents recorded. Nothing to restore from."
+        ),
     };
     prot.vault = Some(id.clone());
     Ok(id)
@@ -198,7 +228,7 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         }
     };
 
-    let vault = ensure_vault(op, &mut prot)?;
+    let vault = resolve_vault(op, &mut prot, true)?;
     let files = expand_patterns(cwd, &prot.patterns)?;
 
     if files.is_empty() {
@@ -305,7 +335,7 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
         bail!("{PROT_FILE} has no locked documents recorded. Nothing to unlock.");
     }
 
-    let vault = ensure_vault(op, &mut prot)?;
+    let vault = resolve_vault(op, &mut prot, false)?;
 
     let mut unlocked = 0;
     for (rel_file, id) in &prot.documents {
@@ -448,6 +478,12 @@ mod tests {
         /// simulating the protected file being modified by something else
         /// during the upload/verify round-trip.
         rewrite_on_get: Option<(PathBuf, Vec<u8>)>,
+        /// What `vault_name` reports for any ID: the vault's current name, or
+        /// `None` for a vault that no longer exists.
+        vault_name_response: Option<String>,
+        /// What `find_vault` reports: the vault's ID, or `None` when no vault
+        /// named ".prot" exists in the account.
+        find_vault_response: Option<String>,
     }
 
     impl MockOp {
@@ -459,6 +495,8 @@ mod tests {
                 signed_in: RefCell::new(true),
                 signin_fails: false,
                 rewrite_on_get: None,
+                vault_name_response: Some(VAULT_NAME.to_string()),
+                find_vault_response: Some("VAULT".to_string()),
             }
         }
 
@@ -503,9 +541,15 @@ mod tests {
             Ok(())
         }
         fn find_vault(&self, _name: &str) -> Result<Option<String>> {
-            Ok(Some("VAULT".into()))
+            self.calls.borrow_mut().push("find_vault".into());
+            Ok(self.find_vault_response.clone())
+        }
+        fn vault_name(&self, _id: &str) -> Result<Option<String>> {
+            self.calls.borrow_mut().push("vault_name".into());
+            Ok(self.vault_name_response.clone())
         }
         fn create_vault(&self, _name: &str, _description: &str) -> Result<String> {
+            self.calls.borrow_mut().push("create_vault".into());
             Ok("VAULT".into())
         }
         fn create_document(
@@ -719,6 +763,71 @@ mod tests {
         assert!(
             !dir.path().join("../escaped.env").exists(),
             "nothing may be written outside the working directory"
+        );
+    }
+
+    // --- vault resolution ---------------------------------------------------
+
+    #[test]
+    fn lock_refuses_vault_id_that_is_not_the_prot_vault() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        // The recorded vault ID resolves to some other vault in the account
+        // (tampered or copy-pasted .prot).
+        op.vault_name_response = Some("Personal".to_string());
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is named \"Personal\""),
+            "expected a wrong-vault refusal, got: {err}"
+        );
+        assert!(
+            !op.called("create_document") && !op.called("edit_document"),
+            "must not write documents into a vault that isn't \".prot\""
+        );
+        assert!(dir.path().join(".env").exists(), ".env must be untouched");
+    }
+
+    #[test]
+    fn lock_refuses_vault_id_that_no_longer_exists() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        op.vault_name_response = None; // recorded vault ID resolves to nothing
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("was not found"),
+            "expected a vault-not-found error, got: {err}"
+        );
+        assert!(dir.path().join(".env").exists(), ".env must be untouched");
+    }
+
+    #[test]
+    fn unlock_errors_instead_of_creating_a_missing_vault() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Simulate a .prot with documents recorded but no usable vault: drop
+        // the cached ID and make the by-name lookup come up empty.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        prot.vault = None;
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+        let mut op = MockOp::new();
+        op.find_vault_response = None;
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("No \".prot\" vault found"),
+            "expected a missing-vault error, got: {err}"
+        );
+        assert!(
+            !op.called("create_vault"),
+            "unlock must never create a vault — the recorded documents \
+             couldn't be in a fresh one"
         );
     }
 

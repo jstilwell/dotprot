@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The recorded vault ID is verified before use.** The `vault:` ID cached in
+  `.prot` is user-editable (and often committed), so lock/unlock now confirm it
+  still refers to a vault actually named `.prot` before touching anything — a
+  tampered or copy-pasted ID can no longer point dotprot's document writes at a
+  different vault in your account. If the vault was renamed or deleted, dotprot
+  stops with instructions instead of proceeding.
+- **Transient 1Password failures can no longer create duplicate `.prot`
+  vaults.** Only op's genuine "isn't a vault in this account" response is
+  treated as "vault missing"; network/auth/ambiguity errors now propagate
+  instead of silently triggering `vault create` (1Password permits duplicate
+  vault names, so this could split storage across two `.prot` vaults).
 - **Delete only what was uploaded.** `lock` now re-reads each file immediately
   before deleting it and aborts (leaving the file in place) if it changed
   during the upload/verify round-trip — previously an edit made in that window
@@ -21,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one — can no longer redirect a restored secret to another location. Neither
   check affects normal lock/unlock round-trips, which only ever record plain
   relative paths.
+
+### Changed
+
+- `unlock` no longer creates the `.prot` vault when it can't be found — a
+  fresh, empty vault could never contain the recorded documents, so it now
+  errors clearly instead. (Only `lock` and `setup` create the vault.)
 
 ## [0.3.0] - 2026-06-28
 

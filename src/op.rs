@@ -92,6 +92,9 @@ pub trait OpBackend {
     /// Run `op signin` interactively.
     fn sign_in(&self) -> Result<()>;
     fn find_vault(&self, name: &str) -> Result<Option<String>>;
+    /// Look up a vault by ID and return its current name, or `None` if no such
+    /// vault exists.
+    fn vault_name(&self, id: &str) -> Result<Option<String>>;
     fn create_vault(&self, name: &str, description: &str) -> Result<String>;
     fn create_document(
         &self,
@@ -123,6 +126,9 @@ impl OpBackend for RealOp {
     }
     fn find_vault(&self, name: &str) -> Result<Option<String>> {
         find_vault(name)
+    }
+    fn vault_name(&self, id: &str) -> Result<Option<String>> {
+        vault_name(id)
     }
     fn create_vault(&self, name: &str, description: &str) -> Result<String> {
         create_vault(name, description)
@@ -195,19 +201,58 @@ pub fn sign_in() -> Result<()> {
     }
 }
 
+/// Whether an `op vault get` failure means "no such vault", as opposed to any
+/// other failure (network, auth, or an ambiguous name matching several vaults).
+///
+/// Only a genuine not-found may be treated as `None`: 1Password allows
+/// duplicate vault names, so misreading a transient error as "missing" would
+/// lead the caller to create a second `.prot` vault and silently split storage
+/// across the two. The current CLI says `"<name>" isn't a vault in this
+/// account.`; the extra patterns cover older/newer phrasings.
+fn vault_not_found(stderr: &str) -> bool {
+    let s = stderr.to_lowercase();
+    s.contains("isn't a vault") || s.contains("is not a vault") || s.contains("vault not found")
+}
+
 /// Find a vault by name. Returns its ID, or `None` if it doesn't exist.
 pub fn find_vault(name: &str) -> Result<Option<String>> {
     match run_op(&["vault", "get", name, "--format=json"]) {
         Ok(stdout) => Ok(Some(parse_id(&stdout)?)),
-        Err(e) => {
-            // `vault get` errors if the vault doesn't exist — treat that as
-            // "not found" rather than a hard failure.
-            if e.downcast_ref::<OpFailure>().is_some() {
-                Ok(None)
-            } else {
-                Err(e)
-            }
+        Err(e) => match e.downcast_ref::<OpFailure>() {
+            Some(f) if vault_not_found(&f.stderr) => Ok(None),
+            _ => Err(e),
+        },
+    }
+}
+
+/// Envelope for pulling the vault's name out of `op vault get --format=json`.
+#[derive(Deserialize)]
+struct VaultEnvelope {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Look up a vault by ID and return its current name, or `None` if no vault
+/// with that ID exists. Lets callers confirm a stored vault ID still refers to
+/// the vault they think it does before writing anything into it.
+pub fn vault_name(id: &str) -> Result<Option<String>> {
+    match run_op(&["vault", "get", id, "--format=json"]) {
+        Ok(stdout) => {
+            let env: VaultEnvelope = serde_json::from_slice(&stdout).with_context(|| {
+                format!(
+                    "could not parse op JSON response: {}",
+                    String::from_utf8_lossy(&stdout).trim()
+                )
+            })?;
+            let name = env
+                .name
+                .ok_or_else(|| anyhow!("op's response for vault {id} did not include a name"))?;
+            Ok(Some(name))
         }
+        Err(e) => match e.downcast_ref::<OpFailure>() {
+            Some(f) if vault_not_found(&f.stderr) => Ok(None),
+            _ => Err(e),
+        },
     }
 }
 
@@ -331,5 +376,22 @@ mod tests {
     fn parse_id_errors_when_neither_present() {
         let out = br#"{"createdAt":"now"}"#;
         assert!(parse_id(out).is_err());
+    }
+
+    #[test]
+    fn vault_not_found_matches_real_op_message() {
+        // Captured verbatim from `op vault get <nonexistent> --format=json`.
+        assert!(vault_not_found(
+            r#"[ERROR] 2026/07/04 10:49:55 "zzz" isn't a vault in this account. Specify the vault with its ID or name."#
+        ));
+    }
+
+    #[test]
+    fn vault_not_found_rejects_other_failures() {
+        // Transient/auth/ambiguity failures must propagate as errors, never be
+        // read as "vault missing" (which would trigger creating a duplicate).
+        assert!(!vault_not_found("network error: dial tcp: i/o timeout"));
+        assert!(!vault_not_found("you are not currently signed in"));
+        assert!(!vault_not_found(r#"More than one vault matches ".prot""#));
     }
 }

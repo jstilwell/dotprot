@@ -196,7 +196,10 @@ after a verified, recoverable copy exists in 1Password.**
   entirely.
 - **Scoped to the `.prot` vault only.** Every 1Password operation is scoped with
   `--vault .prot`. dotprot **never deletes 1Password items in normal
-  operation** — lock creates/updates documents, unlock only reads them.
+  operation** — lock creates/updates documents, unlock only reads them. The
+  vault ID recorded in `.prot` is verified to still be the vault named `.prot`
+  before every run, so a stale or tampered ID can't point writes at another
+  vault in your account.
 - **Incremental persistence.** `.prot` is updated after _each_ file locks, so an
   interruption mid-batch leaves you in a consistent, recoverable state.
 - **Backups are kept.** Documents stay in 1Password after unlock, so a directory
