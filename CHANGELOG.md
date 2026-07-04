@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Local `.prot` backups and a `dotprot restore` command.** Every time dotprot
+  writes a project's `.prot`, it now mirrors it to
+  `~/.prot/backups/<absolute project path>/.prot` (macOS, Linux, and Windows).
+  A new `dotprot restore` command copies the backup back into the current
+  directory if `.prot` was lost — purely local, no 1Password sign-in needed. It
+  never overwrites an existing `.prot`: identical files are a friendly no-op,
+  differing ones are refused. Backups contain no secrets (vault/document IDs
+  and patterns only), and a failed backup write warns without ever blocking a
+  lock.
+
 ### Security
 
 - **The recorded vault ID is verified before use.** The `vault:` ID cached in

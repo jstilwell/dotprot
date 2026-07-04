@@ -59,6 +59,7 @@ Locked 1 file(s) into vault ".prot".
     - [The toggle](#the-toggle)
     - [Trying it safely with `--keep`](#trying-it-safely-with---keep)
   - [The `.prot` file](#the-prot-file)
+  - [`.prot` backups and `dotprot restore`](#prot-backups-and-dotprot-restore)
   - [Safety guarantees](#safety-guarantees)
   - [Development](#development)
   - [License](#license)
@@ -125,6 +126,7 @@ cargo build --release      # binary at target/release/dotprot
 dotprot           # smart toggle: lock if files present, unlock if absent
 dotprot lock      # force lock:   upload → verify → delete from disk
 dotprot unlock    # force unlock: restore files from 1Password
+dotprot restore   # recover this directory's .prot from its local backup
 dotprot --keep    # lock, but keep the originals on disk (don't delete)
 dotprot setup     # optional: pre-create the .prot vault in 1Password
 ```
@@ -182,6 +184,31 @@ config/secrets.json
 > vault/item IDs — **no secrets** — and lets teammates `dotprot unlock` the same
 > files, given access to the vault.
 
+## `.prot` backups and `dotprot restore`
+
+`.prot` is the map from your (deleted) files back to their 1Password documents,
+so losing it is the one local mistake that hurts. Every time dotprot writes a
+`.prot`, it also mirrors it to a per-project backup in your home directory:
+
+```text
+~/.prot/backups/<absolute project path>/.prot
+# e.g. /Users/you/code/myapp  →  ~/.prot/backups/Users/you/code/myapp/.prot
+# on Windows: C:\Users\you\code\myapp  →  C:\Users\you\.prot\backups\C\Users\you\code\myapp\.prot
+```
+
+Deleted your `.prot` by accident? From the project directory:
+
+```sh
+dotprot restore   # copies the backup back; then `dotprot unlock` as usual
+```
+
+`restore` is purely local (no 1Password sign-in needed) and cautious: if a
+`.prot` already exists it never overwrites it — it tells you when the two
+already match, and refuses when they differ. Like `.prot` itself, backups
+contain **no secrets**, only vault/document IDs and your file patterns. A
+backup that can't be written (say, an unwritable home directory) prints a
+warning but never blocks a lock.
+
 ## Safety guarantees
 
 dotprot's whole reason to exist is to make secrets _easier_ to manage, never to
@@ -206,7 +233,9 @@ after a verified, recoverable copy exists in 1Password.**
   can't corrupt the recorded document IDs.
 - **Backups are kept.** Documents stay in 1Password after unlock, so a directory
   stays re-lockable and you always have a copy. Re-locking overwrites the
-  existing document in place.
+  existing document in place. `.prot` itself is mirrored to
+  `~/.prot/backups/…` on every write, and `dotprot restore` brings it back if
+  it's ever lost.
 - **Stable titles.** Document titles are the file's **absolute path**, so
   they're easy to find in the 1Password UI and never collide across directories
   or machines.
