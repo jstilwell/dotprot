@@ -213,14 +213,19 @@ pub fn sign_in() -> Result<()> {
 /// across the two. The current CLI says `"<name>" isn't a vault in this
 /// account.`; the extra patterns cover older/newer phrasings.
 fn vault_not_found(stderr: &str) -> bool {
-    let s = stderr.to_lowercase();
+    // Normalize the typographic apostrophe (U+2019) so a cosmetic change in
+    // op's output can't turn "vault missing" into a hard first-run error.
+    let s = stderr.to_lowercase().replace('\u{2019}', "'");
     s.contains("isn't a vault") || s.contains("is not a vault") || s.contains("vault not found")
 }
 
-/// Find a vault by name. Returns its ID, or `None` if it doesn't exist.
-pub fn find_vault(name: &str) -> Result<Option<String>> {
-    match run_op(&["vault", "get", name, "--format=json"]) {
-        Ok(stdout) => Ok(Some(parse_id(&stdout)?)),
+/// Run `op vault get <query> --format=json`, mapping a genuine "no such
+/// vault" failure to `None`. The single home for the not-found classification,
+/// so [`find_vault`] and [`vault_name`] can never disagree about the same op
+/// error.
+fn vault_get_json(query: &str) -> Result<Option<Vec<u8>>> {
+    match run_op(&["vault", "get", query, "--format=json"]) {
+        Ok(stdout) => Ok(Some(stdout)),
         Err(e) => match e.downcast_ref::<OpFailure>() {
             Some(f) if vault_not_found(&f.stderr) => Ok(None),
             _ => Err(e),
@@ -228,35 +233,34 @@ pub fn find_vault(name: &str) -> Result<Option<String>> {
     }
 }
 
+/// Find a vault by name. Returns its ID, or `None` if it doesn't exist.
+pub fn find_vault(name: &str) -> Result<Option<String>> {
+    vault_get_json(name)?
+        .map(|stdout| parse_id(&stdout))
+        .transpose()
+}
+
 /// Envelope for pulling the vault's name out of `op vault get --format=json`.
 #[derive(Deserialize)]
 struct VaultEnvelope {
-    #[serde(default)]
-    name: Option<String>,
+    name: String,
 }
 
 /// Look up a vault by ID and return its current name, or `None` if no vault
 /// with that ID exists. Lets callers confirm a stored vault ID still refers to
 /// the vault they think it does before writing anything into it.
 pub fn vault_name(id: &str) -> Result<Option<String>> {
-    match run_op(&["vault", "get", id, "--format=json"]) {
-        Ok(stdout) => {
+    vault_get_json(id)?
+        .map(|stdout| {
             let env: VaultEnvelope = serde_json::from_slice(&stdout).with_context(|| {
                 format!(
                     "could not parse op JSON response: {}",
                     String::from_utf8_lossy(&stdout).trim()
                 )
             })?;
-            let name = env
-                .name
-                .ok_or_else(|| anyhow!("op's response for vault {id} did not include a name"))?;
-            Ok(Some(name))
-        }
-        Err(e) => match e.downcast_ref::<OpFailure>() {
-            Some(f) if vault_not_found(&f.stderr) => Ok(None),
-            _ => Err(e),
-        },
-    }
+            Ok(env.name)
+        })
+        .transpose()
 }
 
 /// Create a vault and return its ID.
@@ -386,6 +390,13 @@ mod tests {
         // Captured verbatim from `op vault get <nonexistent> --format=json`.
         assert!(vault_not_found(
             r#"[ERROR] 2026/07/04 10:49:55 "zzz" isn't a vault in this account. Specify the vault with its ID or name."#
+        ));
+    }
+
+    #[test]
+    fn vault_not_found_tolerates_typographic_apostrophe() {
+        assert!(vault_not_found(
+            "[ERROR] \"zzz\" isn\u{2019}t a vault in this account."
         ));
     }
 
