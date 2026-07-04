@@ -365,11 +365,16 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
         bail!("{PROT_FILE} has no locked documents recorded. Nothing to unlock.");
     }
 
+    // Validate every recorded path before restoring anything, so a tampered
+    // entry aborts the run atomically instead of after a partial restore.
+    for (rel_file, _) in &prot.documents {
+        validate_restore_path(rel_file)?;
+    }
+
     let vault = resolve_vault(op, &mut prot, false)?;
 
     let mut unlocked = 0;
     for (rel_file, id) in &prot.documents {
-        validate_restore_path(rel_file)?;
         let abs_file = cwd.join(rel_file);
         if file_exists(&abs_file) {
             println!("  skip {rel_file} (already present on disk)");
@@ -419,17 +424,21 @@ fn write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
 /// often committed to version control, so unlock must not trust it: an entry
 /// like `doc ../../.bashrc: <id>` would otherwise restore vault content to an
 /// arbitrary path outside the project.
+///
+/// This is an allowlist — every component must be a plain name — because a
+/// blocklist under-enumerates: a rooted-but-driveless Windows path like
+/// `\Users\x` is not absolute and has no `Prefix` or `ParentDir` component,
+/// yet `cwd.join()` replaces everything except the drive letter with it.
 fn validate_restore_path(rel_file: &str) -> Result<()> {
     use std::path::Component;
     let path = Path::new(rel_file);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    if path.components().next().is_none()
+        || !path.components().all(|c| matches!(c, Component::Normal(_)))
     {
         bail!(
             "Refusing to restore \"{rel_file}\": {PROT_FILE} entries must be \
-             relative paths inside this directory (no absolute paths or `..`)."
+             plain relative paths inside this directory (no absolute or rooted \
+             paths, no `..`)."
         );
     }
     Ok(())
@@ -448,6 +457,13 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         Some(p) if !p.documents.is_empty() => p,
         _ => return lock(op, cwd, keep),
     };
+
+    // The recorded paths are untrusted input here too: they steer the
+    // lock-vs-unlock decision and are echoed in the mixed-state message, so a
+    // tampered entry could otherwise probe paths outside the project.
+    for (rel_file, _) in &prot.documents {
+        validate_restore_path(rel_file)?;
+    }
 
     // Compare recorded documents against what's on disk.
     let mut present: Vec<&str> = Vec::new();
@@ -793,6 +809,74 @@ mod tests {
         assert!(
             !dir.path().join("../escaped.env").exists(),
             "nothing may be written outside the working directory"
+        );
+    }
+
+    #[test]
+    fn validate_restore_path_allows_only_plain_relative_paths() {
+        assert!(validate_restore_path(".env").is_ok());
+        assert!(validate_restore_path("nested/dir/.env").is_ok());
+        assert!(validate_restore_path("../up.env").is_err());
+        assert!(validate_restore_path("/abs/path.env").is_err());
+        assert!(validate_restore_path("a/../b.env").is_err());
+        assert!(validate_restore_path("").is_err());
+    }
+
+    /// On Windows, `\Users\x` is rooted but NOT absolute and has no Prefix or
+    /// ParentDir component — `cwd.join()` would replace everything except the
+    /// drive letter with it. The allowlist must reject it. (Runs on the
+    /// windows-latest CI job; on Unix a backslash is an ordinary filename
+    /// character, so this shape isn't parseable the same way.)
+    #[cfg(windows)]
+    #[test]
+    fn validate_restore_path_rejects_rooted_driveless_windows_paths() {
+        assert!(validate_restore_path(r"\Users\victim\startup.bat").is_err());
+        assert!(validate_restore_path(r"C:\Users\victim\x").is_err());
+        assert!(validate_restore_path(r"C:relative.env").is_err());
+    }
+
+    #[test]
+    fn unlock_validates_all_paths_before_restoring_anything() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Tamper: a good entry first, a traversal entry second. Unlock must
+        // fail atomically — the good file must NOT be restored first.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![
+            (".env".to_string(), id.clone()),
+            ("../evil".to_string(), id),
+        ];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+
+        assert!(err.to_string().contains("Refusing to restore"));
+        assert!(
+            !dir.path().join(".env").exists(),
+            "a tampered .prot must abort before any file is restored"
+        );
+    }
+
+    #[test]
+    fn toggle_rejects_tampered_document_paths() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // A tampered absolute entry must not let toggle probe (and echo the
+        // existence of) paths outside the project.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents.push(("/etc/hosts".to_string(), id));
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = toggle(&op, dir.path(), false).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing to restore"),
+            "expected toggle to reject the tampered path, got: {err}"
         );
     }
 

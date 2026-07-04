@@ -25,13 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   during the upload/verify round-trip — previously an edit made in that window
   (e.g. by a dev server rewriting `.env`) would be deleted even though the
   verified 1Password copy predated it.
-- **Hardened restore path.** `unlock` now refuses to restore a `.prot` entry
-  whose path is absolute or contains `..` (a tampered `.prot` could otherwise
-  direct vault content to an arbitrary path outside the project), and restored
-  files are opened with `O_CREAT|O_EXCL` so a planted symlink — even a dangling
-  one — can no longer redirect a restored secret to another location. Neither
-  check affects normal lock/unlock round-trips, which only ever record plain
-  relative paths.
+- **Hardened restore path.** `unlock` now accepts only plain relative `.prot`
+  entry paths — absolute paths, `..` components, and rooted Windows paths like
+  `\Users\x` (which `Path::join` would otherwise resolve outside the project)
+  are all refused, and every recorded path is validated **before** the first
+  file is restored, so a tampered `.prot` aborts atomically instead of after a
+  partial restore. The bare toggle applies the same validation before probing
+  any recorded path. Restored files are opened with `O_CREAT|O_EXCL` so a
+  planted symlink — even a dangling one — can no longer redirect a restored
+  secret to another location. None of this affects normal lock/unlock
+  round-trips, which only ever record plain relative paths.
 
 ### Fixed
 
