@@ -190,7 +190,10 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
             // Auto-create on first lock, defaulting to .env*.
             let p = ProtData::empty();
             prot::write(&file, &p)?;
-            println!("Created {PROT_FILE} (protecting: {}).", p.patterns.join(", "));
+            println!(
+                "Created {PROT_FILE} (protecting: {}).",
+                p.patterns.join(", ")
+            );
             p
         }
     };
@@ -279,7 +282,10 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
         Some(p) => p,
-        None => bail!("No {PROT_FILE} found in {}. Nothing to unlock.", cwd.display()),
+        None => bail!(
+            "No {PROT_FILE} found in {}. Nothing to unlock.",
+            cwd.display()
+        ),
     };
     if prot.documents.is_empty() {
         bail!("{PROT_FILE} has no locked documents recorded. Nothing to unlock.");

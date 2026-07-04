@@ -92,8 +92,7 @@ pub fn parse(text: &str) -> ProtData {
                 let pattern = rest[..sep].trim();
                 let id = rest[sep + 1..].trim();
                 if !pattern.is_empty() && !id.is_empty() {
-                    data.documents
-                        .push((pattern.to_string(), id.to_string()));
+                    data.documents.push((pattern.to_string(), id.to_string()));
                 }
             }
         }
