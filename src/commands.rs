@@ -137,13 +137,17 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
                 continue;
             };
             let rel = rel.to_string_lossy().to_string();
-            if rel.chars().any(|c| c.is_control()) {
-                // .prot is a line-oriented format; a control character (e.g. a
-                // newline in the filename) would corrupt the recorded document
-                // id after the original file is already deleted.
+            if rel.chars().any(|c| c.is_control()) || rel != rel.trim() {
+                // .prot is a line-oriented format whose parser trims each
+                // recorded key: a control character (e.g. a newline) would
+                // corrupt the line, and leading/trailing whitespace (a file
+                // named `.env `) would round-trip to a different key — either
+                // way the document id is unrecoverable from .prot after the
+                // original file is already deleted.
                 eprintln!(
-                    "  warning: {rel:?} has control characters in its name — \
-                     skipped (unsupported in {PROT_FILE})"
+                    "  warning: {rel:?} has control characters or leading/\
+                     trailing whitespace in its name — skipped (unsupported \
+                     in {PROT_FILE})"
                 );
                 continue;
             }
@@ -968,6 +972,25 @@ mod tests {
             matches,
             vec![".env".to_string()],
             "a newline in a filename would corrupt the .prot line format"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_patterns_skips_filenames_with_edge_whitespace() {
+        // prot::parse trims each recorded key, so a file named `.env ` would
+        // be locked and deleted but recorded under the trimmed key `.env` —
+        // its mapping lost. Such names must be skipped before upload.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env "), b"SECRET=1\n").unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &[".env*".to_string()]).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string()],
+            "edge whitespace is trimmed by the .prot parser and must be refused"
         );
     }
 

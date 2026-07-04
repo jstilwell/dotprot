@@ -51,9 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `.prot` pattern that matches files **outside** the working directory (e.g.
   `../shared/.env`) now prints a loud warning instead of being skipped
   silently — the file was never protected, but the user had no way to know.
-- A matched filename containing control characters (e.g. a newline) is now
-  skipped with a warning instead of corrupting `.prot`'s line-oriented format
-  after the original file was already deleted.
+- A matched filename containing control characters (e.g. a newline) or
+  leading/trailing whitespace is now skipped with a warning: either would
+  corrupt or mistranslate `.prot`'s line-oriented mapping after the original
+  file was already deleted, leaving the document ID recoverable only by hand
+  from the 1Password UI.
 
 ### Changed
 
