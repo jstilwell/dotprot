@@ -166,6 +166,9 @@ impl OpBackend for RealOp {
 /// interactive sign-in rather than just erroring.
 pub fn is_signed_in() -> Result<bool> {
     // `op whoami` exits non-zero (and prints to stderr) when not signed in.
+    // The string match is brittle across op versions/locales by nature, but it
+    // fails safe: an unrecognized message propagates as the real error below
+    // (the user sees op's own words) rather than being misread as signed in.
     match run_op(&["whoami"]) {
         Ok(_) => Ok(true),
         Err(e) => {
