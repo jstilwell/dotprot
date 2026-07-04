@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secret to another location. None of this affects normal lock/unlock
   round-trips, which only ever record plain relative paths.
 
+- **No silent skips during lock.** A `.prot` pattern that matches files
+  **outside** the working directory (e.g. `../shared/.env`) now prints a loud
+  warning instead of being skipped silently — the file was never protected,
+  but the user had no way to know it was still sitting in plaintext. A matched
+  filename containing control characters (e.g. a newline) or leading/trailing
+  whitespace is likewise skipped **with a warning**: either would corrupt or
+  mistranslate `.prot`'s line-oriented mapping after the original file was
+  already deleted, leaving the document ID recoverable only by hand from the
+  1Password UI.
+
 ### Fixed
 
 - `.prot` is now written **atomically** (temp file + rename in the same
@@ -51,14 +61,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metacharacters (`[`, `]`, `?`, `*`) — previously the directory portion of the
   pattern was interpreted as glob syntax and matching silently failed with "No
   files match".
-- A `.prot` pattern that matches files **outside** the working directory (e.g.
-  `../shared/.env`) now prints a loud warning instead of being skipped
-  silently — the file was never protected, but the user had no way to know.
-- A matched filename containing control characters (e.g. a newline) or
-  leading/trailing whitespace is now skipped with a warning: either would
-  corrupt or mistranslate `.prot`'s line-oriented mapping after the original
-  file was already deleted, leaving the document ID recoverable only by hand
-  from the 1Password UI.
 
 ### Changed
 
