@@ -419,12 +419,24 @@ fn write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path).with_context(|| {
-        format!(
-            "refusing to write {} — something already exists at that path \
-             (possibly a symlink); remove it and run `dotprot unlock` again",
-            path.display()
-        )
+    let mut f = opts.open(path).map_err(|e| {
+        // create_new fails for opposite reasons; give the right advice for
+        // each rather than one blanket message that misleads on the other.
+        let hint = match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "refusing to write {} — something already exists at that path \
+                 (possibly a symlink); remove it and run `dotprot unlock` again",
+                path.display()
+            ),
+            std::io::ErrorKind::NotFound => format!(
+                "cannot write {} — its parent directory does not exist (git \
+                 doesn't track empty directories); create the directory and \
+                 run `dotprot unlock` again",
+                path.display()
+            ),
+            _ => format!("opening {} for writing", path.display()),
+        };
+        anyhow::Error::new(e).context(hint)
     })?;
     f.write_all(content)?;
     Ok(())
@@ -821,6 +833,32 @@ mod tests {
         assert!(
             !dir.path().join("../escaped.env").exists(),
             "nothing may be written outside the working directory"
+        );
+    }
+
+    #[test]
+    fn unlock_reports_missing_parent_directory_accurately() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // A nested path whose directory is absent (e.g. a fresh clone — git
+        // can't track the now-empty dir). The error must point at the missing
+        // directory, not claim something already exists there.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![("config/.env".to_string(), id)];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parent directory does not exist"),
+            "expected a missing-directory hint, got: {msg}"
+        );
+        assert!(
+            !msg.contains("already exists"),
+            "must not claim something exists when the parent dir is missing: {msg}"
         );
     }
 
