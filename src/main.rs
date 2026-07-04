@@ -49,7 +49,14 @@ fn run() -> anyhow::Result<()> {
         None => commands::toggle(&op, &cwd, cli.keep),
         Some(Command::Setup) => commands::setup(&op),
         Some(Command::Lock) => commands::lock(&op, &cwd, cli.keep),
-        Some(Command::Unlock) => commands::unlock(&op, &cwd),
+        Some(Command::Unlock) => {
+            // --keep is a global flag so clap accepts it here; unlock never
+            // deletes anything, so say so rather than silently ignoring it.
+            if cli.keep {
+                eprintln!("note: --keep has no effect on unlock (nothing is deleted).");
+            }
+            commands::unlock(&op, &cwd)
+        }
     }
 }
 

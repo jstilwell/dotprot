@@ -1,0 +1,44 @@
+# Build, test, and lint on every push and pull request.
+#
+# The release workflows only build; this is what actually guards main —
+# dotprot's whole value is its safety guarantees, and those are enforced by
+# the test suite (verify-then-delete ordering, restore-path hardening, vault
+# scoping).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      # Windows is in the matrix because the permission hardening is
+      # cfg(unix)-gated; the suite must pass on both sides of that gate.
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings

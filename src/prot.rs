@@ -17,7 +17,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 const SENTINEL: &str = "# ---- your files (edit below) ----";
 const HEADER_NOTE: &str = "# dotprot — managed below, do not edit";
@@ -92,8 +92,7 @@ pub fn parse(text: &str) -> ProtData {
                 let pattern = rest[..sep].trim();
                 let id = rest[sep + 1..].trim();
                 if !pattern.is_empty() && !id.is_empty() {
-                    data.documents
-                        .push((pattern.to_string(), id.to_string()));
+                    data.documents.push((pattern.to_string(), id.to_string()));
                 }
             }
         }
@@ -134,25 +133,69 @@ pub fn read(path: &Path) -> Result<Option<ProtData>> {
     }
 }
 
-/// Serialize and write `.prot` with owner-only (`0600`) permissions on Unix.
+/// Serialize and write `.prot` atomically, with owner-only (`0600`)
+/// permissions on Unix for newly created files (an existing `.prot`'s
+/// permissions are preserved).
 ///
-/// `.prot` holds no secrets — only vault and document IDs — but it is a precise
-/// map of which 1Password documents hold this project's secrets, so we keep it
-/// as locked down as every other file dotprot writes.
+/// `.prot` holds no secrets — only vault and document IDs — but it is the only
+/// local map from deleted files to their 1Password documents, i.e. the
+/// recovery index. It's written via a temp file in the same directory plus an
+/// atomic rename, so a crash mid-write can never leave it truncated or
+/// half-written.
 pub fn write(path: &Path, data: &ProtData) -> Result<()> {
     use std::io::Write;
-    let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+
+    // The rename-based write would silently change semantics for two shapes
+    // the old truncate-in-place write handled differently; refuse both loudly
+    // instead. A symlinked .prot would be REPLACED by a regular file (the
+    // link target silently stops receiving updates), and a rename succeeds
+    // over a read-only file (only directory permissions matter), which would
+    // bypass a chmod the user set as a deliberate brake.
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            bail!(
+                "{} is a symlink; dotprot writes it atomically by rename and \
+                 will not follow or replace the link. Make it a regular file \
+                 and rerun.",
+                path.display()
+            );
+        }
+        if meta.permissions().readonly() {
+            bail!(
+                "{} is read-only; refusing to rewrite it. Restore write \
+                 permission and rerun.",
+                path.display()
+            );
+        }
     }
-    let mut f = opts
-        .open(path)
+
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".prot-")
+        .tempfile_in(dir)
+        .with_context(|| format!("creating temp file for {}", path.display()))?;
+    tmp.write_all(serialize(data).as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
-    f.write_all(serialize(data).as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+
+    // NamedTempFile is created 0600 on Unix, which is what a fresh .prot
+    // should be. If .prot already exists, carry its permissions over so the
+    // rename doesn't clobber a mode the user chose.
+    #[cfg(unix)]
+    if let Ok(meta) = fs::metadata(path) {
+        fs::set_permissions(tmp.path(), meta.permissions())
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("flushing {}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -245,6 +288,72 @@ mod tests {
             vec![".env".to_string(), ".env.local".to_string()]
         );
         assert_eq!(p.vault, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_symlinked_prot() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.prot");
+        write(&target, &ProtData::empty()).unwrap();
+        let link = dir.path().join(".prot");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write(&link, &ProtData::empty()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is a symlink"),
+            "expected a symlink refusal, got: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink must not be replaced by a regular file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_readonly_prot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".prot");
+        write(&path, &ProtData::empty()).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let mut changed = ProtData::empty();
+        changed.vault = Some("V".to_string());
+        let err = write(&path, &changed).unwrap_err();
+
+        assert!(
+            err.to_string().contains("read-only"),
+            "expected a read-only refusal, got: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            before,
+            "a chmod-frozen .prot must not be rewritten"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".prot");
+        write(&path, &ProtData::empty()).unwrap();
+        // The user loosens the mode deliberately (e.g. so teammates in a
+        // shared checkout can read it); a rewrite must not clobber that.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write(&path, &ProtData::empty()).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "expected 0644, got {:o}", mode & 0o777);
     }
 
     #[cfg(unix)]

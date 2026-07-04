@@ -189,20 +189,36 @@ put them at risk. The design centers on one rule: **a local file is deleted only
 after a verified, recoverable copy exists in 1Password.**
 
 - **Verify-then-delete.** A file is removed from disk only after its 1Password
-  copy is uploaded, **read back, and confirmed byte-identical**. Any failure in
+  copy is uploaded, **read back, and confirmed byte-identical**. The file is
+  also re-read immediately before deletion — if it changed while the upload was
+  in flight, it's left in place (the vault copy would be stale). Any failure in
   that chain leaves the original untouched. Use `--keep` to skip deletion
   entirely.
 - **Scoped to the `.prot` vault only.** Every 1Password operation is scoped with
   `--vault .prot`. dotprot **never deletes 1Password items in normal
-  operation** — lock creates/updates documents, unlock only reads them.
+  operation** — lock creates/updates documents, unlock only reads them. The
+  vault ID recorded in `.prot` is verified to still be the vault named `.prot`
+  before every run, so a stale or tampered ID can't point writes at another
+  vault in your account.
 - **Incremental persistence.** `.prot` is updated after _each_ file locks, so an
-  interruption mid-batch leaves you in a consistent, recoverable state.
+  interruption mid-batch leaves you in a consistent, recoverable state. Each
+  update is written atomically (temp file + rename), so even a crash mid-write
+  can't corrupt the recorded document IDs.
 - **Backups are kept.** Documents stay in 1Password after unlock, so a directory
   stays re-lockable and you always have a copy. Re-locking overwrites the
   existing document in place.
 - **Stable titles.** Document titles are the file's **absolute path**, so
   they're easy to find in the 1Password UI and never collide across directories
   or machines.
+- **Restores stay inside the project.** `unlock` accepts only plain relative
+  `.prot` entry paths (no absolute or rooted paths, no `..`), validates every
+  recorded path before restoring anything, and never writes through a symlink
+  (even a dangling one) — a tampered or malicious `.prot` can't redirect a
+  restored secret elsewhere on disk.
+- **No silent skips.** A pattern match that can't be safely locked — a file
+  outside the working directory, or a filename that `.prot`'s format can't
+  record faithfully — is skipped **with a loud warning**, never silently, so a
+  secret is never left in plaintext while you believe it's protected.
 - **Minimal on-disk exposure.** Secrets are handed to `op` via a short-lived
   `0600` temp file that's deleted immediately afterward (the 1Password CLI does
   not reliably accept piped stdin). Restored files and the `.prot` state file are

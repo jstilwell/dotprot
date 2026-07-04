@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- **The recorded vault ID is verified before use.** The `vault:` ID cached in
+  `.prot` is user-editable (and often committed), so lock/unlock now confirm it
+  still refers to a vault actually named `.prot` before touching anything — a
+  tampered or copy-pasted ID can no longer point dotprot's document writes at a
+  different vault in your account. If the vault was renamed or deleted, dotprot
+  stops with instructions instead of proceeding.
+- **Transient 1Password failures can no longer create duplicate `.prot`
+  vaults.** Only op's genuine "isn't a vault in this account" response is
+  treated as "vault missing"; network/auth/ambiguity errors now propagate
+  instead of silently triggering `vault create` (1Password permits duplicate
+  vault names, so this could split storage across two `.prot` vaults).
+- **Delete only what was uploaded.** `lock` now re-reads each file immediately
+  before deleting it and aborts (leaving the file in place) if it changed
+  during the upload/verify round-trip — previously an edit made in that window
+  (e.g. by a dev server rewriting `.env`) would be deleted even though the
+  verified 1Password copy predated it.
+- **Hardened restore path.** `unlock` now accepts only plain relative `.prot`
+  entry paths — absolute paths, `..` components, and rooted Windows paths like
+  `\Users\x` (which `Path::join` would otherwise resolve outside the project)
+  are all refused, and every recorded path is validated **before** the first
+  file is restored, so a tampered `.prot` aborts atomically instead of after a
+  partial restore. The bare toggle applies the same validation before probing
+  any recorded path. Restored files are opened with `O_CREAT|O_EXCL` so a
+  planted symlink — even a dangling one — can no longer redirect a restored
+  secret to another location. None of this affects normal lock/unlock
+  round-trips, which only ever record plain relative paths.
+
+- **No silent skips during lock.** A `.prot` pattern that matches files
+  **outside** the working directory (e.g. `../shared/.env`) now prints a loud
+  warning instead of being skipped silently — the file was never protected,
+  but the user had no way to know it was still sitting in plaintext. A matched
+  filename containing control characters (e.g. a newline) or leading/trailing
+  whitespace is likewise skipped **with a warning**: either would corrupt or
+  mistranslate `.prot`'s line-oriented mapping after the original file was
+  already deleted, leaving the document ID recoverable only by hand from the
+  1Password UI.
+
+### Fixed
+
+- `.prot` is now written **atomically** (temp file + rename in the same
+  directory), so a crash or power loss mid-write can no longer leave it
+  truncated or half-written. `.prot` is the only local map from
+  already-deleted files to their 1Password documents, so corrupting it meant
+  recovering document IDs by hand from the 1Password UI. An existing `.prot`'s
+  permissions are still preserved; new files remain `0600` on Unix. Because a
+  rename would silently replace a symlinked `.prot` (breaking the link) and
+  sail over a read-only one, dotprot now **refuses to write** a `.prot` that
+  is a symlink or read-only, with a clear error before anything is deleted.
+- Locking now works in project directories whose path contains glob
+  metacharacters (`[`, `]`, `?`, `*`) — previously the directory portion of the
+  pattern was interpreted as glob syntax and matching silently failed with "No
+  files match".
+
+### Changed
+
+- `unlock` no longer creates the `.prot` vault when it can't be found — a
+  fresh, empty vault could never contain the recorded documents, so it now
+  errors clearly instead. (Only `lock` and `setup` create the vault.)
+- `dotprot unlock --keep` — and bare `dotprot --keep` when the toggle resolves
+  to an unlock — now prints a note that `--keep` has no effect on unlock,
+  instead of silently ignoring the flag.
+- `dotprot lock` with nothing to lock now bails before contacting 1Password,
+  instead of spending a network round-trip first.
 
 ## [0.3.0] - 2026-06-28
 

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::op::OpBackend;
 use crate::prot::{self, ProtData};
@@ -85,11 +85,23 @@ fn prot_path(cwd: &Path) -> PathBuf {
 fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
     let mut matches: BTreeSet<String> = BTreeSet::new();
 
+    // The working directory becomes the literal prefix of every glob, so any
+    // metacharacters in it (`[`, `?`, `*` — brackets in directory names are
+    // real) must be escaped or matching silently fails.
+    let escaped_cwd = glob::Pattern::escape(&cwd.to_string_lossy());
+
     for pattern in patterns {
         // Resolve the glob relative to cwd, then store the path back as a
         // cwd-relative string so document titles and .prot keys stay stable.
-        let abs_pattern = cwd.join(pattern);
-        let abs_pattern = abs_pattern.to_string_lossy();
+        // A rooted/absolute pattern stands alone (Path::join semantics — the
+        // base is replaced): gluing it onto cwd would silently re-anchor
+        // `/shared/x.env` at `<cwd>/shared/x.env`, a different file that
+        // could then be locked and deleted.
+        let abs_pattern = if Path::new(pattern).has_root() {
+            cwd.join(pattern).to_string_lossy().into_owned()
+        } else {
+            format!("{escaped_cwd}{}{pattern}", std::path::MAIN_SEPARATOR)
+        };
         for entry in glob::glob(&abs_pattern)? {
             let path = match entry {
                 Ok(p) => p,
@@ -106,11 +118,41 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
             if !path.is_file() {
                 continue;
             }
-            if let Ok(rel) = path.strip_prefix(cwd) {
-                let rel = rel.to_string_lossy().to_string();
-                if rel != PROT_FILE {
-                    matches.insert(rel);
-                }
+            // A pattern like `../shared/.env` can match outside the working
+            // directory. strip_prefix is lexical — `cwd/../x` still "strips" —
+            // so any remaining `..` component also means the file is outside.
+            // dotprot only protects files under cwd; say so loudly, or the
+            // user will believe the file is locked while it sits in plaintext.
+            let rel = path.strip_prefix(cwd).ok().filter(|rel| {
+                !rel.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            });
+            let Some(rel) = rel else {
+                eprintln!(
+                    "  warning: {} is outside {} — skipped (dotprot only \
+                     protects files inside the working directory)",
+                    path.display(),
+                    cwd.display()
+                );
+                continue;
+            };
+            let rel = rel.to_string_lossy().to_string();
+            if rel.chars().any(|c| c.is_control()) || rel != rel.trim() {
+                // .prot is a line-oriented format whose parser trims each
+                // recorded key: a control character (e.g. a newline) would
+                // corrupt the line, and leading/trailing whitespace (a file
+                // named `.env `) would round-trip to a different key — either
+                // way the document id is unrecoverable from .prot after the
+                // original file is already deleted.
+                eprintln!(
+                    "  warning: {rel:?} has control characters or leading/\
+                     trailing whitespace in its name — skipped (unsupported \
+                     in {PROT_FILE})"
+                );
+                continue;
+            }
+            if rel != PROT_FILE {
+                matches.insert(rel);
             }
         }
     }
@@ -151,21 +193,51 @@ pub fn setup(op: &impl OpBackend) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the vault ID, finding it if not already cached in `prot`. If the
-/// vault doesn't exist in 1Password yet, create it (a one-time action) and
-/// announce it clearly so the user knows a vault was made in their account.
-fn ensure_vault(op: &impl OpBackend, prot: &mut ProtData) -> Result<String> {
-    if let Some(v) = &prot.vault {
-        return Ok(v.clone());
+/// Resolve the 1Password vault ID to use for this run.
+///
+/// If `.prot` records a vault ID, verify it still refers to a vault actually
+/// named ".prot" before using it. The ID is user-editable (and often committed
+/// to version control), so trusting it blindly would let a tampered or
+/// copy-pasted value silently point dotprot's document writes at some other
+/// vault in the account.
+///
+/// Otherwise look the vault up by name. `create_if_missing` decides whether a
+/// missing vault is created (lock — a one-time action, announced clearly) or
+/// an error (unlock — a fresh empty vault could never contain the recorded
+/// documents, so creating one only muddies the account).
+fn resolve_vault(
+    op: &impl OpBackend,
+    prot: &mut ProtData,
+    create_if_missing: bool,
+) -> Result<String> {
+    if let Some(id) = &prot.vault {
+        return match op.vault_name(id)? {
+            Some(name) if name == VAULT_NAME => Ok(id.clone()),
+            Some(name) => bail!(
+                "The vault recorded in {PROT_FILE} ({id}) is named \"{name}\", not \
+                 \"{VAULT_NAME}\". Refusing to touch it. If that vault was renamed, \
+                 rename it back; if the ID is stale, remove the `vault:` line from \
+                 {PROT_FILE} and rerun."
+            ),
+            None => bail!(
+                "The vault recorded in {PROT_FILE} ({id}) was not found in your \
+                 1Password account. If it was deleted, remove the `vault:` line \
+                 from {PROT_FILE} and rerun."
+            ),
+        };
     }
     let id = match op.find_vault(VAULT_NAME)? {
         Some(found) => found,
-        None => {
+        None if create_if_missing => {
             let created = op.create_vault(VAULT_NAME, VAULT_DESCRIPTION)?;
             println!("Created 1Password vault \"{VAULT_NAME}\" ({created}).");
             println!("(one-time setup — future runs reuse it)");
             created
         }
+        None => bail!(
+            "No \"{VAULT_NAME}\" vault found in your 1Password account, but \
+             {PROT_FILE} has documents recorded. Nothing to restore from."
+        ),
     };
     prot.vault = Some(id.clone());
     Ok(id)
@@ -190,12 +262,16 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
             // Auto-create on first lock, defaulting to .env*.
             let p = ProtData::empty();
             prot::write(&file, &p)?;
-            println!("Created {PROT_FILE} (protecting: {}).", p.patterns.join(", "));
+            println!(
+                "Created {PROT_FILE} (protecting: {}).",
+                p.patterns.join(", ")
+            );
             p
         }
     };
 
-    let vault = ensure_vault(op, &mut prot)?;
+    // Expand patterns first: it's free local work, and bailing on an empty
+    // match must not cost the network round-trip that vault resolution takes.
     let files = expand_patterns(cwd, &prot.patterns)?;
 
     if files.is_empty() {
@@ -205,6 +281,8 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
             prot.patterns.join(", ")
         );
     }
+
+    let vault = resolve_vault(op, &mut prot, true)?;
 
     let mut locked = 0;
     for rel_file in &files {
@@ -252,6 +330,20 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         if keep {
             println!("  uploaded {rel_file} -> 1Password (kept on disk)");
         } else {
+            // The upload and read-back take real time (network round-trips);
+            // the file may have been modified meanwhile, in which case the
+            // verified vault copy is already stale and deleting would destroy
+            // bytes that were never uploaded. Re-read and only delete if the
+            // file is still exactly what we stored.
+            let current = fs::read(&abs_file)
+                .with_context(|| format!("re-reading {rel_file} before delete"))?;
+            if current != content {
+                bail!(
+                    "{rel_file} changed on disk while it was being uploaded, so the \
+                     copy in 1Password is already stale. Left {rel_file} in place — \
+                     run `dotprot lock` again to store the new contents."
+                );
+            }
             fs::remove_file(&abs_file)?;
             println!("  locked {rel_file} -> 1Password");
         }
@@ -279,13 +371,22 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
     let file = prot_path(cwd);
     let mut prot = match prot::read(&file)? {
         Some(p) => p,
-        None => bail!("No {PROT_FILE} found in {}. Nothing to unlock.", cwd.display()),
+        None => bail!(
+            "No {PROT_FILE} found in {}. Nothing to unlock.",
+            cwd.display()
+        ),
     };
     if prot.documents.is_empty() {
         bail!("{PROT_FILE} has no locked documents recorded. Nothing to unlock.");
     }
 
-    let vault = ensure_vault(op, &mut prot)?;
+    // Validate every recorded path before restoring anything, so a tampered
+    // entry aborts the run atomically instead of after a partial restore.
+    for (rel_file, _) in &prot.documents {
+        validate_restore_path(rel_file)?;
+    }
+
+    let vault = resolve_vault(op, &mut prot, false)?;
 
     let mut unlocked = 0;
     for (rel_file, id) in &prot.documents {
@@ -307,17 +408,66 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
 }
 
 /// Write a restored file with owner-only (0600) permissions on Unix.
+///
+/// Opens with `create_new` (O_CREAT|O_EXCL): the open fails if anything —
+/// including a dangling symlink, which `file_exists` reads as "absent" —
+/// already sits at the path. A plain `create(true)` would follow such a
+/// symlink and write the secret to wherever it points.
 fn write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
+    let mut f = opts.open(path).map_err(|e| {
+        // create_new fails for opposite reasons; give the right advice for
+        // each rather than one blanket message that misleads on the other.
+        let hint = match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!(
+                "refusing to write {} — something already exists at that path \
+                 (possibly a symlink); remove it and run `dotprot unlock` again",
+                path.display()
+            ),
+            std::io::ErrorKind::NotFound => format!(
+                "cannot write {} — its parent directory does not exist (git \
+                 doesn't track empty directories); create the directory and \
+                 run `dotprot unlock` again",
+                path.display()
+            ),
+            _ => format!("opening {} for writing", path.display()),
+        };
+        anyhow::Error::new(e).context(hint)
+    })?;
     f.write_all(content)?;
+    Ok(())
+}
+
+/// Reject recorded file paths that could escape the working directory.
+///
+/// Lock only ever records cwd-relative paths, but `.prot` is user-editable and
+/// often committed to version control, so unlock must not trust it: an entry
+/// like `doc ../../.bashrc: <id>` would otherwise restore vault content to an
+/// arbitrary path outside the project.
+///
+/// This is an allowlist — every component must be a plain name — because a
+/// blocklist under-enumerates: a rooted-but-driveless Windows path like
+/// `\Users\x` is not absolute and has no `Prefix` or `ParentDir` component,
+/// yet `cwd.join()` replaces everything except the drive letter with it.
+fn validate_restore_path(rel_file: &str) -> Result<()> {
+    use std::path::Component;
+    let path = Path::new(rel_file);
+    if path.components().next().is_none()
+        || !path.components().all(|c| matches!(c, Component::Normal(_)))
+    {
+        bail!(
+            "Refusing to restore \"{rel_file}\": {PROT_FILE} entries must be \
+             plain relative paths inside this directory (no absolute or rooted \
+             paths, no `..`)."
+        );
+    }
     Ok(())
 }
 
@@ -334,6 +484,13 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         Some(p) if !p.documents.is_empty() => p,
         _ => return lock(op, cwd, keep),
     };
+
+    // The recorded paths are untrusted input here too: they steer the
+    // lock-vs-unlock decision and are echoed in the mixed-state message, so a
+    // tampered entry could otherwise probe paths outside the project.
+    for (rel_file, _) in &prot.documents {
+        validate_restore_path(rel_file)?;
+    }
 
     // Compare recorded documents against what's on disk.
     let mut present: Vec<&str> = Vec::new();
@@ -359,7 +516,12 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
     }
 
     if !absent.is_empty() {
-        // Everything recorded is missing -> restore. (--keep is a no-op here.)
+        // Everything recorded is missing -> restore. Same note the explicit
+        // `unlock --keep` prints — the flag must not be swallowed silently on
+        // either entry path.
+        if keep {
+            eprintln!("note: --keep has no effect on unlock (nothing is deleted).");
+        }
         unlock(op, cwd)
     } else {
         // Everything recorded is present -> re-lock.
@@ -390,6 +552,16 @@ mod tests {
         /// When true, `sign_in()` does NOT flip `signed_in` — modelling a user
         /// who cancels the auth or whose session still isn't usable afterward.
         signin_fails: bool,
+        /// When set, `get_document` rewrites this (path, bytes) on disk —
+        /// simulating the protected file being modified by something else
+        /// during the upload/verify round-trip.
+        rewrite_on_get: Option<(PathBuf, Vec<u8>)>,
+        /// What `vault_name` reports for any ID: the vault's current name, or
+        /// `None` for a vault that no longer exists.
+        vault_name_response: Option<String>,
+        /// What `find_vault` reports: the vault's ID, or `None` when no vault
+        /// named ".prot" exists in the account.
+        find_vault_response: Option<String>,
     }
 
     impl MockOp {
@@ -400,6 +572,9 @@ mod tests {
                 corrupt_readback: false,
                 signed_in: RefCell::new(true),
                 signin_fails: false,
+                rewrite_on_get: None,
+                vault_name_response: Some(VAULT_NAME.to_string()),
+                find_vault_response: Some("VAULT".to_string()),
             }
         }
 
@@ -444,9 +619,15 @@ mod tests {
             Ok(())
         }
         fn find_vault(&self, _name: &str) -> Result<Option<String>> {
-            Ok(Some("VAULT".into()))
+            self.calls.borrow_mut().push("find_vault".into());
+            Ok(self.find_vault_response.clone())
+        }
+        fn vault_name(&self, _id: &str) -> Result<Option<String>> {
+            self.calls.borrow_mut().push("vault_name".into());
+            Ok(self.vault_name_response.clone())
         }
         fn create_vault(&self, _name: &str, _description: &str) -> Result<String> {
+            self.calls.borrow_mut().push("create_vault".into());
             Ok("VAULT".into())
         }
         fn create_document(
@@ -475,6 +656,9 @@ mod tests {
         }
         fn get_document(&self, _vault: &str, id: &str) -> Result<Vec<u8>> {
             self.calls.borrow_mut().push("get_document".into());
+            if let Some((path, bytes)) = &self.rewrite_on_get {
+                fs::write(path, bytes).unwrap();
+            }
             let bytes = self
                 .docs
                 .borrow()
@@ -589,6 +773,336 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "restored file must be 0600");
         }
+    }
+
+    #[test]
+    fn lock_keeps_file_that_changed_during_upload() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        // The vault copy round-trips fine, but the file on disk is rewritten
+        // during the verify step — deleting it would lose the new contents.
+        op.rewrite_on_get = Some((dir.path().join(".env"), b"SECRET=2\n".to_vec()));
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("changed on disk"),
+            "expected a changed-on-disk error, got: {err}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(".env")).unwrap(),
+            b"SECRET=2\n",
+            "the modified file must survive untouched"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlock_refuses_to_write_through_dangling_symlink() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Plant a dangling symlink where .env used to be. `file_exists` reads
+        // it as absent (try_exists follows links), so unlock proceeds — but the
+        // open must refuse to write through the link.
+        let target = dir.path().join("attacker-target");
+        std::os::unix::fs::symlink(&target, dir.path().join(".env")).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to write"),
+            "expected a refusal error, got: {err:#}"
+        );
+        assert!(
+            !target.exists(),
+            "secret must not be written through the symlink"
+        );
+    }
+
+    #[test]
+    fn unlock_rejects_paths_that_escape_the_directory() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Simulate a tampered .prot: rewrite the recorded entry to a traversal
+        // path pointing outside the working directory.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![("../escaped.env".to_string(), id)];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing to restore"),
+            "expected a traversal refusal, got: {err}"
+        );
+        assert!(
+            !dir.path().join("../escaped.env").exists(),
+            "nothing may be written outside the working directory"
+        );
+    }
+
+    #[test]
+    fn unlock_reports_missing_parent_directory_accurately() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // A nested path whose directory is absent (e.g. a fresh clone — git
+        // can't track the now-empty dir). The error must point at the missing
+        // directory, not claim something already exists there.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![("config/.env".to_string(), id)];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("parent directory does not exist"),
+            "expected a missing-directory hint, got: {msg}"
+        );
+        assert!(
+            !msg.contains("already exists"),
+            "must not claim something exists when the parent dir is missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_restore_path_allows_only_plain_relative_paths() {
+        assert!(validate_restore_path(".env").is_ok());
+        assert!(validate_restore_path("nested/dir/.env").is_ok());
+        assert!(validate_restore_path("../up.env").is_err());
+        assert!(validate_restore_path("/abs/path.env").is_err());
+        assert!(validate_restore_path("a/../b.env").is_err());
+        assert!(validate_restore_path("").is_err());
+    }
+
+    /// On Windows, `\Users\x` is rooted but NOT absolute and has no Prefix or
+    /// ParentDir component — `cwd.join()` would replace everything except the
+    /// drive letter with it. The allowlist must reject it. (Runs on the
+    /// windows-latest CI job; on Unix a backslash is an ordinary filename
+    /// character, so this shape isn't parseable the same way.)
+    #[cfg(windows)]
+    #[test]
+    fn validate_restore_path_rejects_rooted_driveless_windows_paths() {
+        assert!(validate_restore_path(r"\Users\victim\startup.bat").is_err());
+        assert!(validate_restore_path(r"C:\Users\victim\x").is_err());
+        assert!(validate_restore_path(r"C:relative.env").is_err());
+    }
+
+    #[test]
+    fn unlock_validates_all_paths_before_restoring_anything() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Tamper: a good entry first, a traversal entry second. Unlock must
+        // fail atomically — the good file must NOT be restored first.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![
+            (".env".to_string(), id.clone()),
+            ("../evil".to_string(), id),
+        ];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+
+        assert!(err.to_string().contains("Refusing to restore"));
+        assert!(
+            !dir.path().join(".env").exists(),
+            "a tampered .prot must abort before any file is restored"
+        );
+    }
+
+    #[test]
+    fn toggle_rejects_tampered_document_paths() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // A tampered absolute entry must not let toggle probe (and echo the
+        // existence of) paths outside the project.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents.push(("/etc/hosts".to_string(), id));
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = toggle(&op, dir.path(), false).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing to restore"),
+            "expected toggle to reject the tampered path, got: {err}"
+        );
+    }
+
+    // --- pattern expansion --------------------------------------------------
+
+    #[test]
+    fn lock_works_in_directory_with_glob_metacharacters() {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("we[i]rd dir");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join(".env"), b"SECRET=1\n").unwrap();
+        let mut prot = ProtData::empty();
+        prot.vault = Some("VAULT".to_string());
+        prot::write(&dir.join(PROT_FILE), &prot).unwrap();
+
+        let op = MockOp::new();
+        lock(&op, &dir, false).unwrap();
+
+        assert!(
+            !dir.join(".env").exists(),
+            ".env must lock even when the project path contains [ ] metacharacters"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_skips_matches_outside_the_working_directory() {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("project");
+        fs::create_dir(&dir).unwrap();
+        fs::write(outer.path().join("outside.env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(&dir, &["../outside.env".to_string()]).unwrap();
+
+        assert!(
+            matches.is_empty(),
+            "files outside cwd must not be treated as protectable: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_does_not_reanchor_absolute_patterns_under_cwd() {
+        // Regression test: an absolute pattern must keep Path::join semantics
+        // (the pattern stands alone). Concatenating it onto cwd would make
+        // `/shared/x.env` match `<cwd>/shared/x.env` — a different file that
+        // lock would then upload and DELETE.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("shared")).unwrap();
+        fs::write(dir.path().join("shared/x.env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &["/shared/x.env".to_string()]).unwrap();
+
+        assert!(
+            matches.is_empty(),
+            "an absolute pattern must not match a cwd-relative file: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_matches_absolute_pattern_inside_cwd() {
+        // An absolute pattern that names a file inside the project worked
+        // before the glob-escaping change and must keep working.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+        let abs = dir.path().join(".env").to_string_lossy().to_string();
+
+        let matches = expand_patterns(dir.path(), &[abs]).unwrap();
+
+        assert_eq!(matches, vec![".env".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_patterns_skips_filenames_with_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env\nx"), b"SECRET=1\n").unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &[".env*".to_string()]).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string()],
+            "a newline in a filename would corrupt the .prot line format"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expand_patterns_skips_filenames_with_edge_whitespace() {
+        // prot::parse trims each recorded key, so a file named `.env ` would
+        // be locked and deleted but recorded under the trimmed key `.env` —
+        // its mapping lost. Such names must be skipped before upload.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env "), b"SECRET=1\n").unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &[".env*".to_string()]).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string()],
+            "edge whitespace is trimmed by the .prot parser and must be refused"
+        );
+    }
+
+    // --- vault resolution ---------------------------------------------------
+
+    #[test]
+    fn lock_refuses_vault_id_that_is_not_the_prot_vault() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        // The recorded vault ID resolves to some other vault in the account
+        // (tampered or copy-pasted .prot).
+        op.vault_name_response = Some("Personal".to_string());
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is named \"Personal\""),
+            "expected a wrong-vault refusal, got: {err}"
+        );
+        assert!(
+            !op.called("create_document") && !op.called("edit_document"),
+            "must not write documents into a vault that isn't \".prot\""
+        );
+        assert!(dir.path().join(".env").exists(), ".env must be untouched");
+    }
+
+    #[test]
+    fn lock_refuses_vault_id_that_no_longer_exists() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        op.vault_name_response = None; // recorded vault ID resolves to nothing
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("was not found"),
+            "expected a vault-not-found error, got: {err}"
+        );
+        assert!(dir.path().join(".env").exists(), ".env must be untouched");
+    }
+
+    #[test]
+    fn unlock_errors_instead_of_creating_a_missing_vault() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Simulate a .prot with documents recorded but no usable vault: drop
+        // the cached ID and make the by-name lookup come up empty.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        prot.vault = None;
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+        let mut op = MockOp::new();
+        op.find_vault_response = None;
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("No \".prot\" vault found"),
+            "expected a missing-vault error, got: {err}"
+        );
+        assert!(
+            !op.called("create_vault"),
+            "unlock must never create a vault — the recorded documents \
+             couldn't be in a fresh one"
+        );
     }
 
     // --- sign-in orchestration --------------------------------------------
