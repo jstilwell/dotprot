@@ -17,7 +17,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 const SENTINEL: &str = "# ---- your files (edit below) ----";
 const HEADER_NOTE: &str = "# dotprot — managed below, do not edit";
@@ -145,6 +145,30 @@ pub fn read(path: &Path) -> Result<Option<ProtData>> {
 pub fn write(path: &Path, data: &ProtData) -> Result<()> {
     use std::io::Write;
 
+    // The rename-based write would silently change semantics for two shapes
+    // the old truncate-in-place write handled differently; refuse both loudly
+    // instead. A symlinked .prot would be REPLACED by a regular file (the
+    // link target silently stops receiving updates), and a rename succeeds
+    // over a read-only file (only directory permissions matter), which would
+    // bypass a chmod the user set as a deliberate brake.
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            bail!(
+                "{} is a symlink; dotprot writes it atomically by rename and \
+                 will not follow or replace the link. Make it a regular file \
+                 and rerun.",
+                path.display()
+            );
+        }
+        if meta.permissions().readonly() {
+            bail!(
+                "{} is read-only; refusing to rewrite it. Restore write \
+                 permission and rerun.",
+                path.display()
+            );
+        }
+    }
+
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
@@ -264,6 +288,55 @@ mod tests {
             vec![".env".to_string(), ".env.local".to_string()]
         );
         assert_eq!(p.vault, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_symlinked_prot() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.prot");
+        write(&target, &ProtData::empty()).unwrap();
+        let link = dir.path().join(".prot");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write(&link, &ProtData::empty()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("is a symlink"),
+            "expected a symlink refusal, got: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink must not be replaced by a regular file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_readonly_prot() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".prot");
+        write(&path, &ProtData::empty()).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let mut changed = ProtData::empty();
+        changed.vault = Some("V".to_string());
+        let err = write(&path, &changed).unwrap_err();
+
+        assert!(
+            err.to_string().contains("read-only"),
+            "expected a read-only refusal, got: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            before,
+            "a chmod-frozen .prot must not be rewritten"
+        );
     }
 
     #[cfg(unix)]
