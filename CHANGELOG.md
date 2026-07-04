@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Delete only what was uploaded.** `lock` now re-reads each file immediately
+  before deleting it and aborts (leaving the file in place) if it changed
+  during the upload/verify round-trip — previously an edit made in that window
+  (e.g. by a dev server rewriting `.env`) would be deleted even though the
+  verified 1Password copy predated it.
 - **Hardened restore path.** `unlock` now refuses to restore a `.prot` entry
   whose path is absolute or contains `..` (a tampered `.prot` could otherwise
   direct vault content to an arbitrary path outside the project), and restored

@@ -189,7 +189,9 @@ put them at risk. The design centers on one rule: **a local file is deleted only
 after a verified, recoverable copy exists in 1Password.**
 
 - **Verify-then-delete.** A file is removed from disk only after its 1Password
-  copy is uploaded, **read back, and confirmed byte-identical**. Any failure in
+  copy is uploaded, **read back, and confirmed byte-identical**. The file is
+  also re-read immediately before deletion — if it changed while the upload was
+  in flight, it's left in place (the vault copy would be stale). Any failure in
   that chain leaves the original untouched. Use `--keep` to skip deletion
   entirely.
 - **Scoped to the `.prot` vault only.** Every 1Password operation is scoped with

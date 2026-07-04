@@ -255,6 +255,20 @@ pub fn lock(op: &impl OpBackend, cwd: &Path, keep: bool) -> Result<()> {
         if keep {
             println!("  uploaded {rel_file} -> 1Password (kept on disk)");
         } else {
+            // The upload and read-back take real time (network round-trips);
+            // the file may have been modified meanwhile, in which case the
+            // verified vault copy is already stale and deleting would destroy
+            // bytes that were never uploaded. Re-read and only delete if the
+            // file is still exactly what we stored.
+            let current = fs::read(&abs_file)
+                .with_context(|| format!("re-reading {rel_file} before delete"))?;
+            if current != content {
+                bail!(
+                    "{rel_file} changed on disk while it was being uploaded, so the \
+                     copy in 1Password is already stale. Left {rel_file} in place — \
+                     run `dotprot lock` again to store the new contents."
+                );
+            }
             fs::remove_file(&abs_file)?;
             println!("  locked {rel_file} -> 1Password");
         }
@@ -430,6 +444,10 @@ mod tests {
         /// When true, `sign_in()` does NOT flip `signed_in` — modelling a user
         /// who cancels the auth or whose session still isn't usable afterward.
         signin_fails: bool,
+        /// When set, `get_document` rewrites this (path, bytes) on disk —
+        /// simulating the protected file being modified by something else
+        /// during the upload/verify round-trip.
+        rewrite_on_get: Option<(PathBuf, Vec<u8>)>,
     }
 
     impl MockOp {
@@ -440,6 +458,7 @@ mod tests {
                 corrupt_readback: false,
                 signed_in: RefCell::new(true),
                 signin_fails: false,
+                rewrite_on_get: None,
             }
         }
 
@@ -515,6 +534,9 @@ mod tests {
         }
         fn get_document(&self, _vault: &str, id: &str) -> Result<Vec<u8>> {
             self.calls.borrow_mut().push("get_document".into());
+            if let Some((path, bytes)) = &self.rewrite_on_get {
+                fs::write(path, bytes).unwrap();
+            }
             let bytes = self
                 .docs
                 .borrow()
@@ -629,6 +651,27 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "restored file must be 0600");
         }
+    }
+
+    #[test]
+    fn lock_keeps_file_that_changed_during_upload() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let mut op = MockOp::new();
+        // The vault copy round-trips fine, but the file on disk is rewritten
+        // during the verify step — deleting it would lose the new contents.
+        op.rewrite_on_get = Some((dir.path().join(".env"), b"SECRET=2\n".to_vec()));
+
+        let err = lock(&op, dir.path(), false).unwrap_err();
+
+        assert!(
+            err.to_string().contains("changed on disk"),
+            "expected a changed-on-disk error, got: {err}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(".env")).unwrap(),
+            b"SECRET=2\n",
+            "the modified file must survive untouched"
+        );
     }
 
     #[cfg(unix)]
