@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Security
+
+- **Hardened restore path.** `unlock` now refuses to restore a `.prot` entry
+  whose path is absolute or contains `..` (a tampered `.prot` could otherwise
+  direct vault content to an arbitrary path outside the project), and restored
+  files are opened with `O_CREAT|O_EXCL` so a planted symlink — even a dangling
+  one — can no longer redirect a restored secret to another location. Neither
+  check affects normal lock/unlock round-trips, which only ever record plain
+  relative paths.
 
 ## [0.3.0] - 2026-06-28
 

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::op::OpBackend;
 use crate::prot::{self, ProtData};
@@ -295,6 +295,7 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
 
     let mut unlocked = 0;
     for (rel_file, id) in &prot.documents {
+        validate_restore_path(rel_file)?;
         let abs_file = cwd.join(rel_file);
         if file_exists(&abs_file) {
             println!("  skip {rel_file} (already present on disk)");
@@ -313,17 +314,50 @@ pub fn unlock(op: &impl OpBackend, cwd: &Path) -> Result<()> {
 }
 
 /// Write a restored file with owner-only (0600) permissions on Unix.
+///
+/// Opens with `create_new` (O_CREAT|O_EXCL): the open fails if anything —
+/// including a dangling symlink, which `file_exists` reads as "absent" —
+/// already sits at the path. A plain `create(true)` would follow such a
+/// symlink and write the secret to wherever it points.
 fn write_owner_only(path: &Path, content: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut opts = fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
+    let mut f = opts.open(path).with_context(|| {
+        format!(
+            "refusing to write {} — something already exists at that path \
+             (possibly a symlink); remove it and run `dotprot unlock` again",
+            path.display()
+        )
+    })?;
     f.write_all(content)?;
+    Ok(())
+}
+
+/// Reject recorded file paths that could escape the working directory.
+///
+/// Lock only ever records cwd-relative paths, but `.prot` is user-editable and
+/// often committed to version control, so unlock must not trust it: an entry
+/// like `doc ../../.bashrc: <id>` would otherwise restore vault content to an
+/// arbitrary path outside the project.
+fn validate_restore_path(rel_file: &str) -> Result<()> {
+    use std::path::Component;
+    let path = Path::new(rel_file);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
+        bail!(
+            "Refusing to restore \"{rel_file}\": {PROT_FILE} entries must be \
+             relative paths inside this directory (no absolute paths or `..`)."
+        );
+    }
     Ok(())
 }
 
@@ -595,6 +629,54 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "restored file must be 0600");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlock_refuses_to_write_through_dangling_symlink() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Plant a dangling symlink where .env used to be. `file_exists` reads
+        // it as absent (try_exists follows links), so unlock proceeds — but the
+        // open must refuse to write through the link.
+        let target = dir.path().join("attacker-target");
+        std::os::unix::fs::symlink(&target, dir.path().join(".env")).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("refusing to write"),
+            "expected a refusal error, got: {err:#}"
+        );
+        assert!(
+            !target.exists(),
+            "secret must not be written through the symlink"
+        );
+    }
+
+    #[test]
+    fn unlock_rejects_paths_that_escape_the_directory() {
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false).unwrap();
+
+        // Simulate a tampered .prot: rewrite the recorded entry to a traversal
+        // path pointing outside the working directory.
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        let id = prot.document_id(".env").unwrap().to_string();
+        prot.documents = vec![("../escaped.env".to_string(), id)];
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = unlock(&op, dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("Refusing to restore"),
+            "expected a traversal refusal, got: {err}"
+        );
+        assert!(
+            !dir.path().join("../escaped.env").exists(),
+            "nothing may be written outside the working directory"
+        );
     }
 
     // --- sign-in orchestration --------------------------------------------

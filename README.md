@@ -203,6 +203,10 @@ after a verified, recoverable copy exists in 1Password.**
 - **Stable titles.** Document titles are the file's **absolute path**, so
   they're easy to find in the 1Password UI and never collide across directories
   or machines.
+- **Restores stay inside the project.** `unlock` refuses `.prot` entries with
+  absolute paths or `..` components, and never writes through a symlink (even a
+  dangling one) — a tampered or malicious `.prot` can't redirect a restored
+  secret elsewhere on disk.
 - **Minimal on-disk exposure.** Secrets are handed to `op` via a short-lived
   `0600` temp file that's deleted immediately afterward (the 1Password CLI does
   not reliably accept piped stdin). Restored files and the `.prot` state file are
