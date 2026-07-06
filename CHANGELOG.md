@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Globs no longer lock template files like `.env.example`.** A glob pattern
+  (including the default `.env*`) now skips files whose name ends in
+  `.example`, `.sample`, `.template`, or `.dist` — these are committed
+  templates, not secrets, and locking one deleted it from disk. dotprot prints
+  a `skip` line for each. Listing such a file by its exact name in `.prot`
+  still protects it.
 
 ## [0.4.0] - 2026-07-04
 

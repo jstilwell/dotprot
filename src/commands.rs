@@ -95,11 +95,26 @@ fn backup_prot(home: Option<&Path>, cwd: &Path, data: &ProtData) {
     }
 }
 
+/// File-name suffixes that mark a committed template rather than a real
+/// secret (`.env.example` and friends). A glob like the default `.env*` must
+/// not lock — and delete — a file that's meant to stay in the repo, so these
+/// are skipped unless the user names the file exactly in `.prot`.
+const TEMPLATE_SUFFIXES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
+
+fn is_template_file(rel: &str) -> bool {
+    Path::new(rel)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .is_some_and(|name| TEMPLATE_SUFFIXES.iter().any(|s| name.ends_with(s)))
+}
+
 /// Expand the user's patterns against the working dir into concrete relative
-/// file paths. The `.prot` file itself is always excluded. Globs only match
-/// files that exist on disk (used by lock). Results are sorted and de-duped.
+/// file paths. The `.prot` file itself is always excluded, and glob patterns
+/// skip template files (see [`TEMPLATE_SUFFIXES`]). Globs only match files
+/// that exist on disk (used by lock). Results are sorted and de-duped.
 fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
     let mut matches: BTreeSet<String> = BTreeSet::new();
+    let mut skipped_templates: BTreeSet<String> = BTreeSet::new();
 
     // The working directory becomes the literal prefix of every glob, so any
     // metacharacters in it (`[`, `?`, `*` — brackets in directory names are
@@ -107,6 +122,9 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
     let escaped_cwd = glob::Pattern::escape(&cwd.to_string_lossy());
 
     for pattern in patterns {
+        // A pattern with no glob metacharacters names one file exactly; that
+        // explicitness is the opt-in that overrides the template-file skip.
+        let is_glob = pattern.contains(['*', '?', '[']);
         // Resolve the glob relative to cwd, then store the path back as a
         // cwd-relative string so document titles and .prot keys stay stable.
         // A rooted/absolute pattern stands alone (Path::join semantics — the
@@ -167,10 +185,24 @@ fn expand_patterns(cwd: &Path, patterns: &[String]) -> Result<Vec<String>> {
                 );
                 continue;
             }
-            if rel != PROT_FILE {
-                matches.insert(rel);
+            if rel == PROT_FILE {
+                continue;
             }
+            if is_glob && is_template_file(&rel) {
+                skipped_templates.insert(rel);
+                continue;
+            }
+            matches.insert(rel);
         }
+    }
+
+    // Announce each skip once, and only if no other (literal) pattern pulled
+    // the file back in — a skipped-then-included file would read as both.
+    for rel in skipped_templates.difference(&matches) {
+        println!(
+            "  skip {rel} (template file — list it by exact name in {PROT_FILE} \
+             to protect it)"
+        );
     }
 
     Ok(matches.into_iter().collect())
@@ -1072,6 +1104,57 @@ mod tests {
         let matches = expand_patterns(dir.path(), &[abs]).unwrap();
 
         assert_eq!(matches, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn expand_patterns_glob_skips_template_files() {
+        // The default `.env*` glob must not sweep up committed template files —
+        // locking one deletes it from disk even though it holds no secrets.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+        for name in [".env.example", ".env.sample", ".env.template", ".env.dist"] {
+            fs::write(dir.path().join(name), b"SECRET=\n").unwrap();
+        }
+
+        let matches = expand_patterns(dir.path(), &[".env*".to_string()]).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string()],
+            "template files must not be locked via a glob match"
+        );
+    }
+
+    #[test]
+    fn expand_patterns_includes_template_file_listed_literally() {
+        // Naming the file exactly is the opt-in for the rare case where a
+        // template-suffixed file really does hold secrets.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env.example"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(dir.path(), &[".env.example".to_string()]).unwrap();
+
+        assert_eq!(matches, vec![".env.example".to_string()]);
+    }
+
+    #[test]
+    fn expand_patterns_literal_wins_over_glob_skip_for_template_files() {
+        // A file skipped by one (glob) pattern but named exactly by another
+        // must still be protected.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".env"), b"SECRET=1\n").unwrap();
+        fs::write(dir.path().join(".env.example"), b"SECRET=1\n").unwrap();
+
+        let matches = expand_patterns(
+            dir.path(),
+            &[".env*".to_string(), ".env.example".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            matches,
+            vec![".env".to_string(), ".env.example".to_string()]
+        );
     }
 
     #[cfg(unix)]

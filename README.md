@@ -184,6 +184,15 @@ config/secrets.json
 > vault/item IDs — **no secrets** — and lets teammates `dotprot unlock` the same
 > files, given access to the vault.
 
+### Template files are not swept up by globs
+
+Glob patterns skip files whose name ends in `.example`, `.sample`, `.template`,
+or `.dist` — so the default `.env*` protects `.env` and `.env.local` but leaves
+`.env.example` alone, since template files hold no secrets and are meant to
+stay in the repo. dotprot prints a `skip` line when this happens. In the rare
+case such a file really does contain secrets, list it by its exact name in
+`.prot` (e.g. a literal `.env.example` line) and it will be protected.
+
 ## `.prot` backups and `dotprot restore`
 
 `.prot` is the map from your (deleted) files back to their 1Password documents,
