@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.4.1] - 2026-07-06
+
 ### Fixed
 
 - **Globs no longer lock template files like `.env.example`.** A glob pattern
@@ -180,7 +184,8 @@ demand.
   immediately, and restored files are written with `0600` permissions.
 
 [cargo-dist]: https://github.com/axodotdev/cargo-dist
-[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jstilwell/dotprot/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jstilwell/dotprot/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jstilwell/dotprot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jstilwell/dotprot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jstilwell/dotprot/compare/v0.1.0...v0.2.0
