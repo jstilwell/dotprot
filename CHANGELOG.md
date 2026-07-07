@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Bare `dotprot` no longer reports a phantom "mixed state" over leftover
+  template documents.** A `.prot` written before globs learned to skip template
+  files (`.env.example` and friends) still records those templates as documents.
+  Because a template legitimately stays on disk, the toggle saw it as "present"
+  while the real secret was "missing" and refused as mixed. The toggle now
+  ignores template-suffixed documents when deciding whether to lock or unlock,
+  unless the file is listed by its exact name in `.prot` (the same opt-in lock
+  honors). Nothing is deleted from disk or 1Password.
 
 ## [0.4.1] - 2026-07-06
 
