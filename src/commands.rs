@@ -108,6 +108,17 @@ fn is_template_file(rel: &str) -> bool {
         .is_some_and(|name| TEMPLATE_SUFFIXES.iter().any(|s| name.ends_with(s)))
 }
 
+/// Whether a recorded document path is opted in by a literal (non-glob) pattern
+/// naming it exactly. This mirrors the lock-time rule in [`expand_patterns`]:
+/// naming a template file exactly is the explicit opt-in that overrides the
+/// template-file skip. Used so a leftover template *document* is only treated as
+/// a real protected file when the user actually asked for it by name.
+fn listed_literally(patterns: &[String], rel: &str) -> bool {
+    patterns
+        .iter()
+        .any(|p| !p.contains(['*', '?', '[']) && p == rel)
+}
+
 /// Expand the user's patterns against the working dir into concrete relative
 /// file paths. The `.prot` file itself is always excluded, and glob patterns
 /// skip template files (see [`TEMPLATE_SUFFIXES`]). Globs only match files
@@ -593,10 +604,18 @@ pub fn toggle(op: &impl OpBackend, cwd: &Path, keep: bool, home: Option<&Path>) 
         validate_restore_path(rel_file)?;
     }
 
-    // Compare recorded documents against what's on disk.
+    // Compare recorded documents against what's on disk. Template files
+    // (`.env.example` and friends) recorded by an older lock — before globs
+    // learned to skip them — must not steer this decision: they legitimately
+    // stay on disk, so counting them would show a phantom "mixed state"
+    // whenever the real secrets are locked away. Skip them here unless the user
+    // named one literally in `.prot`, the same opt-in lock honors.
     let mut present: Vec<&str> = Vec::new();
     let mut absent: Vec<&str> = Vec::new();
     for (rel_file, _) in &prot.documents {
+        if is_template_file(rel_file) && !listed_literally(&prot.patterns, rel_file) {
+            continue;
+        }
         if file_exists(&cwd.join(rel_file)) {
             present.push(rel_file);
         } else {
@@ -1036,6 +1055,62 @@ mod tests {
         assert!(
             err.to_string().contains("Refusing to restore"),
             "expected toggle to reject the tampered path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn toggle_ignores_leftover_template_documents() {
+        // Reproduces the real-world mixed-state bug: a `.prot` from before the
+        // template-skip feature still records `.env.example` as a document. With
+        // the real secret locked away (absent) and the template still on disk
+        // (present), the old toggle saw one present + one absent and refused as
+        // "mixed". It must instead ignore the template doc and choose unlock.
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false, None).unwrap();
+
+        // Forge the pre-fix state: a template file on disk plus a recorded
+        // document for it (as an old lock would have created).
+        fs::write(dir.path().join(".env.example"), b"SECRET=\n").unwrap();
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        prot.set_document(".env.example", "DOC_TEMPLATE");
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        // The real secret (.env) is absent, the template is present. Toggle must
+        // not bail with a mixed-state error; it restores the real secret.
+        toggle(&op, dir.path(), false, None).unwrap();
+
+        assert_eq!(
+            fs::read(dir.path().join(".env")).unwrap(),
+            b"SECRET=1\n",
+            "the real secret should have been unlocked"
+        );
+        assert!(
+            dir.path().join(".env.example").exists(),
+            "the template file must be left untouched on disk"
+        );
+    }
+
+    #[test]
+    fn toggle_counts_template_document_listed_literally() {
+        // The opt-in escape hatch: if the user named a template file exactly in
+        // `.prot`, it really is a protected secret and must still steer the
+        // toggle. Here it's present while the real secret is absent, so honoring
+        // it correctly yields the mixed-state error (not a silent skip).
+        let dir = setup_dir(b"SECRET=1\n");
+        let op = MockOp::new();
+        lock(&op, dir.path(), false, None).unwrap();
+
+        fs::write(dir.path().join(".env.example"), b"SECRET=\n").unwrap();
+        let mut prot = prot::read(&dir.path().join(PROT_FILE)).unwrap().unwrap();
+        prot.set_document(".env.example", "DOC_TEMPLATE");
+        prot.patterns.push(".env.example".to_string()); // literal opt-in
+        prot::write(&dir.path().join(PROT_FILE), &prot).unwrap();
+
+        let err = toggle(&op, dir.path(), false, None).unwrap_err();
+        assert!(
+            err.to_string().contains("Mixed state"),
+            "a literally-listed template must still count, got: {err}"
         );
     }
 

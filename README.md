@@ -154,6 +154,11 @@ Running bare `dotprot` figures out which way to go from what's on disk:
 | Protected files are **missing**        | Restores them from 1Password                                          |
 | **Mixed** (some present, some missing) | Stops and asks you to be explicit (`dotprot lock` / `dotprot unlock`) |
 
+Template files (`.env.example` and friends — see below) don't count toward this
+decision, even if an older `.prot` still records one as a document. They belong
+on disk, so the toggle ignores them rather than reading a project with locked
+secrets and a checked-in `.env.example` as a "mixed" state.
+
 ### Trying it safely with `--keep`
 
 Before trusting dotprot to delete anything, upload-and-verify without removing
