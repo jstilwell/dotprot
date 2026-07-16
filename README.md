@@ -53,6 +53,7 @@ Locked 1 file(s) into vault ".prot".
   - [Install](#install)
     - [Homebrew](#homebrew)
     - [Cargo](#cargo)
+    - [npm](#npm)
     - [Prebuilt binaries](#prebuilt-binaries)
     - [From source](#from-source)
   - [Usage](#usage)
@@ -105,6 +106,15 @@ brew install jstilwell/tap/dotprot
 ```sh
 cargo install dotprot
 ```
+
+### npm
+
+```sh
+npm install -g dotprot
+```
+
+Installs a prebuilt binary for your platform (no Rust toolchain needed). One-off
+runs work too: `npx dotprot`.
 
 ### Prebuilt binaries
 
