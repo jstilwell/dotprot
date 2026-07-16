@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **npm install channel.** dotprot can now be installed with
+  `npm install -g dotprot` (or run one-off via `npx dotprot`). The npm package
+  wraps the same prebuilt release binaries as the other installers; releases
+  publish it automatically alongside Homebrew and crates.io.
 
 ## [0.4.2] - 2026-07-07
 
