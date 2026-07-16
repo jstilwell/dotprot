@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The npm package is now `@jstilwell/dotprot`.** v0.5.0 announced an npm
+  channel but its publish was rejected by the registry: npm forbids the
+  unscoped name `dotprot` as too similar to the existing `dot-prop` package,
+  so no npm package ever shipped for 0.5.0. Install with
+  `npm install -g @jstilwell/dotprot`; the installed command is still
+  `dotprot`.
 
 ## [0.5.0] - 2026-07-16
 

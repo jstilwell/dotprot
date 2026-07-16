@@ -110,11 +110,13 @@ cargo install dotprot
 ### npm
 
 ```sh
-npm install -g dotprot
+npm install -g @jstilwell/dotprot
 ```
 
-Installs a prebuilt binary for your platform (no Rust toolchain needed). One-off
-runs work too: `npx dotprot`.
+Installs a prebuilt binary for your platform (no Rust toolchain needed) — the
+command is still `dotprot`. One-off runs work too: `npx @jstilwell/dotprot`.
+(The package is scoped because npm reserves the bare name as too similar to
+`dot-prop`.)
 
 ### Prebuilt binaries
 
